@@ -249,41 +249,56 @@ function updateMediaMetadata(speedStr: string, isRunning: boolean) {
     return
 
   const title = isRunning ? `⬇️ ${speedStr}` : '已暂停'
-  const artist = '流量消耗器'
-  const album = isRunning ? '后台运行中' : '等待启动'
+  const artist = '流量消耗器 Pro' // 改个名字试试
+  const album = isRunning ? `正在下载... ${formatSize(totalDownloaded.value)}` : '等待中' // 把总流量也放进去
 
-  // 生成动态封面 (使用 Canvas 绘制简单图标)
+  // 生成动态封面 (保持高对比度)
   const canvas = document.createElement('canvas')
   canvas.width = 512
   canvas.height = 512
   const ctx = canvas.getContext('2d')
   if (ctx) {
-    ctx.fillStyle = isRunning ? '#409EFF' : '#909399'
+    // 背景色
+    ctx.fillStyle = isRunning ? '#007AFF' : '#8E8E93'
     ctx.fillRect(0, 0, 512, 512)
-    ctx.font = 'bold 60px Arial'
+
+    // 绘制文字
+    ctx.font = 'bold 80px San Francisco, Arial'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
     ctx.fillStyle = '#ffffff'
-    ctx.fillText(isRunning ? 'DOWNLOAD' : 'PAUSED', 256, 256)
+    ctx.fillText(isRunning ? 'DOWNLOAD' : 'PAUSED', 256, 200)
+
+    ctx.font = '60px San Francisco, Arial'
+    ctx.fillText(speedStr, 256, 300)
   }
   const artwork = canvas.toDataURL('image/png')
 
   try {
-    navigator.mediaSession.metadata = new MediaMetadata({
+    const metadata = new MediaMetadata({
       title,
       artist,
       album,
       artwork: [
+        { src: artwork, sizes: '96x96', type: 'image/png' },
+        { src: artwork, sizes: '128x128', type: 'image/png' },
+        { src: artwork, sizes: '192x192', type: 'image/png' },
+        { src: artwork, sizes: '256x256', type: 'image/png' },
+        { src: artwork, sizes: '384x384', type: 'image/png' },
         { src: artwork, sizes: '512x512', type: 'image/png' },
       ],
     })
+
+    navigator.mediaSession.metadata = metadata
     navigator.mediaSession.playbackState = isRunning ? 'playing' : 'paused'
+
+    // 调试日志
+    // console.log('📱 锁屏元数据已更新:', title)
   }
   catch (e) {
-    console.warn('MediaMetadata 设置失败', e)
+    console.warn('MediaMetadata 更新失败', e)
   }
 }
-
 // ==========================================
 // 【核心新增】音频中断监听与自动恢复逻辑
 // ==========================================
@@ -385,6 +400,7 @@ onMounted(() => {
     // 【新增】如果开启了后台保活，实时更新锁屏/灵动岛显示的速度
     if (isIOSBackgroundEnabled.value && 'mediaSession' in navigator) {
       const isRunning = newState.status === 'running'
+      // 只有当状态变化或速度变化较大时才更新，避免过于频繁
       updateMediaMetadata(formatSpeed(newState.currentSpeed), isRunning)
     }
   })
@@ -470,17 +486,65 @@ function formatDuration(ms: number) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
 }
 
+// 【新增】创建一个极低频、极低音量的振荡器，欺骗 iOS 显示锁屏控件
+// 【新增/确认存在】创建一个极低频、极低音量的振荡器
+function startBackgroundAudio() {
+  if (!audioContext || isAudioPlaying)
+    return
+
+  try {
+    // 1. 创建振荡器 (产生正弦波)
+    const oscillator = audioContext.createOscillator()
+    oscillator.type = 'sine'
+    oscillator.frequency.value = 40 // 40Hz，人耳很难听到的低频
+
+    // 2. 创建增益节点 (控制音量)
+    const gainNode = audioContext.createGain()
+    gainNode.gain.value = 0.005 // 音量设为 0.5%，几乎听不见，但不是 0
+
+    // 3. 连接节点
+    oscillator.connect(gainNode)
+    gainNode.connect(audioContext.destination)
+
+    // 4. 开始播放
+    oscillator.start(0)
+
+    // 保存引用 (注意类型转换，因为原变量可能是 BufferSourceNode 类型)
+    audioSource = oscillator as any
+    isAudioPlaying = true
+    isAudioInterrupted = false
+
+    console.log('✅ 后台保活音频已启动 (40Hz 低频波)')
+  }
+  catch (e) {
+    console.error('❌ 启动背景音频失败', e)
+    isAudioPlaying = false
+  }
+}
+
 function toggleIOSBackground(enabled?: boolean) {
   const shouldEnable = enabled !== undefined ? enabled : isIOSBackgroundEnabled.value
 
   if (!shouldEnable) {
-    if (audioContext)
+    // --- 关闭逻辑 ---
+    if (audioContext) {
       audioContext.suspend()
+      if (audioSource) {
+        try {
+          audioSource.stop()
+          audioSource.disconnect()
+        }
+        catch (e) {}
+        audioSource = null
+      }
+    }
 
-    // 清理 Media Session
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'none'
-      navigator.mediaSession.metadata = null
+      setTimeout(() => {
+        if (!isIOSBackgroundEnabled.value)
+          navigator.mediaSession.metadata = null
+      }, 1000)
     }
 
     isAudioPlaying = false
@@ -488,55 +552,58 @@ function toggleIOSBackground(enabled?: boolean) {
     return
   }
 
+  // --- 开启逻辑 ---
   try {
     if (!audioContext) {
       audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
-      // 【关键】注册监听器
       setupAudioInterruptionListener()
     }
 
-    if (audioContext.state === 'suspended') {
-      audioContext.resume()
-    }
+    // 【修复点】不再使用 await，而是使用 .then() 链式调用
+    const resumePromise = audioContext.state === 'suspended'
+      ? audioContext.resume()
+      : Promise.resolve()
 
-    if (!isAudioPlaying) {
-      const buffer = audioContext.createBuffer(1, audioContext.sampleRate * 2, audioContext.sampleRate)
-      audioSource = audioContext.createBufferSource()
-      audioSource.buffer = buffer
-      audioSource.loop = true
-      audioSource.connect(audioContext.destination)
-      audioSource.start(0)
-      isAudioPlaying = true
-      isAudioInterrupted = false
+    resumePromise.then(() => {
+      if (!isAudioPlaying) {
+        startBackgroundAudio() // 启动低频波音频
 
-      // 【新增】初始化 Media Session 控制
-      if ('mediaSession' in navigator) {
-        updateMediaMetadata(formatSpeed(currentSpeed.value), status.value === 'running')
+        // 初始化 Media Session
+        if ('mediaSession' in navigator) {
+          updateMediaMetadata(formatSpeed(currentSpeed.value), status.value === 'running')
 
-        // 绑定锁屏/控制中心的播放按钮
-        navigator.mediaSession.setActionHandler('play', () => {
-          if (status.value === 'paused' || status.value === 'idle') {
-            handleStart()
-          }
-          else if (audioContext?.state === 'suspended') {
-            audioContext.resume()
-          }
-          updateMediaMetadata(formatSpeed(currentSpeed.value), true)
-        })
+          navigator.mediaSession.setActionHandler('play', () => {
+            console.log('🎵 锁屏点击播放')
+            if (['paused', 'idle', 'stopped'].includes(status.value)) {
+              handleStart()
+            }
+            else if (audioContext?.state === 'suspended') {
+              audioContext.resume()
+            }
+            updateMediaMetadata(formatSpeed(currentSpeed.value), true)
+          })
 
-        // 绑定锁屏/控制中心的暂停按钮
-        navigator.mediaSession.setActionHandler('pause', () => {
-          handlePauseToggle()
-          updateMediaMetadata(formatSpeed(currentSpeed.value), false)
-        })
+          navigator.mediaSession.setActionHandler('pause', () => {
+            console.log('🎵 锁屏点击暂停')
+            handlePauseToggle()
+            updateMediaMetadata(formatSpeed(currentSpeed.value), false)
+          })
+
+          navigator.mediaSession.setActionHandler('previoustrack', () => {})
+          navigator.mediaSession.setActionHandler('nexttrack', () => {})
+        }
+
+        ElMessage.success('iOS 后台保活已开启 (低频音频模式)')
       }
-
-      ElMessage.success('iOS 后台保活已开启 (含锁屏/灵动岛显示)')
-    }
+    }).catch((err) => {
+      console.error('❌ AudioContext 恢复失败', err)
+      ElMessage.warning('无法启动音频上下文')
+      isIOSBackgroundEnabled.value = false
+    })
   }
-  catch (e) {
+  catch (e: any) {
     console.error(e)
-    ElMessage.warning('无法启动后台保活，请先与页面交互或浏览器不支持')
+    ElMessage.warning(`无法启动后台保活：${e.message}`)
     isIOSBackgroundEnabled.value = false
   }
 }
