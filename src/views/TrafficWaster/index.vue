@@ -119,6 +119,89 @@ const isRunningState = computed(() => ['starting', 'running', 'paused'].includes
 const effectiveTargetGB = computed(() => selectedTargetMode.value === 'custom' ? customTargetValue.value : selectedTargetMode.value)
 const currentResourceUrl = computed(() => config.resourceUrlInput || '未选择')
 
+// 处理鼠标移动事件，计算悬停位置
+function handleChartMouseMove(event: MouseEvent, dataLength: number) {
+  if (!dataLength)
+    return
+  const rect = (event.target as HTMLElement).getBoundingClientRect()
+  const x = event.clientX - rect.left
+  const width = rect.width
+
+  // 计算鼠标对应的是第几个数据点
+  const index = Math.min(
+    dataLength - 1,
+    Math.max(0, Math.floor((x / width) * dataLength)),
+  )
+
+  hoverIndex.value = index
+  tooltipPos.value = { x: event.clientX, y: event.clientY }
+}
+
+function handleChartLeave() {
+  hoverIndex.value = null
+  isChartHovered.value = false
+}
+
+function handleChartEnter() {
+  isChartHovered.value = true
+}
+
+const showChart = ref(false)
+const maxSpeed = computed(() => {
+  // 【保护】如果开关关闭或无数据，直接返回 0
+  if (!showChart.value || !state.speedHistory || state.speedHistory.length === 0)
+    return 0
+  const max = Math.max(...state.speedHistory.map(d => d?.speed || 0))
+  return max > 0 ? max : 1000
+})
+
+const sparklinePoints = computed(() => {
+  // 【保护】开关关闭直接返回空，不执行任何计算
+  if (!showChart.value)
+    return ''
+
+  const history = state.speedHistory
+  if (!history || history.length < 2)
+    return ''
+
+  const width = 100
+  const height = 50
+  const maxVal = maxSpeed.value
+
+  const len = history.length - 1
+  if (len === 0)
+    return ''
+
+  return history.map((d, index) => {
+    if (!d || typeof d.speed !== 'number')
+      return ''
+    const x = (index / len) * width
+    const y = height - ((d.speed / maxVal) * height)
+    return `${x},${y}`
+  }).filter(p => p !== '').join(' ')
+})
+
+const hoverData = computed(() => {
+  // 【保护】开关关闭直接返回 null
+  if (!showChart.value)
+    return null
+  if (hoverIndex.value === null)
+    return null
+  if (!state.speedHistory || hoverIndex.value >= state.speedHistory.length)
+    return null
+
+  const data = state.speedHistory[hoverIndex.value]
+  if (!data || typeof data.speed !== 'number')
+    return null
+
+  return {
+    speed: data.speed,
+    time: new Date(data.time),
+    speedStr: formatSpeed(data.speed),
+    timeStr: data.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+  }
+})
+
 const displayTarget = computed(() => {
   if (selectedTargetMode.value === 'infinity')
     return '∞'
@@ -285,9 +368,27 @@ onUnmounted(() => {
 const formatMbps = (b: number) => b <= 0 ? '0 Mbps' : `${((b * 8) / (1024 * 1024)).toFixed(2)} Mbps`
 const formatSpeed = (b: number) => `${formatSize(b)}/s`
 const elapsedTimeStr = computed(() => {
+  // 1. 如果没有开始时间，返回 0
   if (!state.startTime)
     return '00:00:00'
-  return formatDuration(currentTime.value - state.startTime)
+
+  // 2. 【核心修改】如果任务已结束、停止或出错，使用“结束时间”而非“当前时间”
+  // 这样计时器就会定格在任务结束的那一刻
+  const isFinishedState = ['finished', 'stopped', 'error'].includes(status.value)
+
+  let endTime = currentTime.value // 默认使用当前时间（运行时）
+
+  if (isFinishedState && state.lastCheckTime) {
+    // 如果处于结束状态，且有最后检查时间，则使用该时间作为结束点
+    // 注意：lastCheckTime 在 logic.ts 的定时器中每秒更新，非常接近实际结束时间
+    endTime = state.lastCheckTime
+  }
+  else if (isFinishedState && !state.lastCheckTime) {
+    // 极端情况：如果刚启动就报错没有 lastCheckTime， fallback 到 startTime
+    endTime = state.startTime
+  }
+
+  return formatDuration(endTime - state.startTime)
 })
 const estimatedEndTimeStr = computed(() => {
   if (effectiveTargetGB.value === 'infinity' || currentSpeed.value <= 0 || status.value !== 'running')
@@ -740,6 +841,120 @@ function handleReset() {
               </el-col>
             </el-row>
 
+            <!-- 【新增】图表控制栏 -->
+            <!--            <div class="chart-control-bar">
+              <span class="control-label">
+                <el-icon><TrendCharts /></el-icon>
+                实时速率图表
+              </span>
+              <el-switch
+                v-model="showChart"
+                inline-prompt
+                active-text="开"
+                inactive-text="关"
+                size="small"
+                style="&#45;&#45;el-switch-on-color: #13ce66; &#45;&#45;el-switch-off-color: #909399"
+              />
+            </div> -->
+            <!-- 【优化版】速率趋势图表区域 -->
+            <div v-if="showChart && state.speedHistory && state.speedHistory.length > 0" class="chart-container">
+              <div class="chart-header">
+                <span class="chart-title">📈 实时速率趋势</span>
+                <span class="chart-max">
+                  峰值：<b>{{ formatSpeed(maxSpeed) }}</b>
+                  <span v-if="hoverData" class="hover-info">
+                    | 当前指向：{{ hoverData.speedStr }} ({{ hoverData.timeStr }})
+                  </span>
+                </span>
+              </div>
+
+              <div
+                class="chart-body"
+                @mouseenter="handleChartEnter"
+                @mouseleave="handleChartLeave"
+                @mousemove="handleChartMouseMove($event, state.speedHistory.length)"
+              >
+                <svg viewBox="0 0 100 50" class="sparkline" preserveAspectRatio="none">
+                  <defs>
+                    <linearGradient id="speedGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stop-color="#409EFF" stop-opacity="0.6" />
+                      <stop offset="100%" stop-color="#409EFF" stop-opacity="0.05" />
+                    </linearGradient>
+                  </defs>
+
+                  <!-- 填充区域 -->
+                  <polygon
+                    v-if="sparklinePoints"
+                    :points="`0,50 ${sparklinePoints} 100,50`"
+                    fill="url(#speedGradient)"
+                  />
+
+                  <!-- 折线 -->
+                  <polyline
+                    v-if="sparklinePoints"
+                    :points="sparklinePoints"
+                    fill="none"
+                    stroke="#409EFF"
+                    stroke-width="1.5"
+                    vector-effect="non-scaling-stroke"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+
+                  <!-- 【新增】悬停竖线 -->
+                  <line
+                    v-if="hoverIndex !== null"
+                    :x1="(hoverIndex / (state.speedHistory.length - 1 || 1)) * 100"
+                    y1="0"
+                    :x2="(hoverIndex / (state.speedHistory.length - 1 || 1)) * 100"
+                    y2="50"
+                    stroke="#909399"
+                    stroke-width="0.5"
+                    stroke-dasharray="2,2"
+                    vector-effect="non-scaling-stroke"
+                  />
+
+                  <!-- 【新增】悬停圆点 -->
+                  <circle
+                    v-if="hoverIndex !== null && sparklinePoints"
+                    :cx="(hoverIndex / (state.speedHistory.length - 1 || 1)) * 100"
+                    :cy="50 - ((state.speedHistory[hoverIndex].speed / maxSpeed) * 50)"
+                    r="2"
+                    fill="#fff"
+                    stroke="#409EFF"
+                    stroke-width="1.5"
+                    vector-effect="non-scaling-stroke"
+                  />
+                </svg>
+
+                <!-- 【新增】自定义 Tooltip (跟随鼠标) -->
+                <div
+                  v-if="hoverData"
+                  class="chart-tooltip"
+                  :style="{ left: `${tooltipPos.x}px`, top: `${tooltipPos.y - 60}px` }"
+                >
+                  <div class="tooltip-time">
+                    {{ hoverData.timeStr }}
+                  </div>
+                  <div class="tooltip-speed">
+                    {{ hoverData.speedStr }}
+                  </div>
+                  <div class="tooltip-mbps">
+                    {{ formatMbps(hoverData.speed) }}
+                  </div>
+                </div>
+              </div>
+
+              <!-- 横坐标时间轴 (简化版：显示开始和结束时间) -->
+              <div class="chart-axis">
+                <span v-if="state.speedHistory.length > 1">
+                  {{ new Date(state.speedHistory[0].time).toLocaleTimeString([], { minute: '2-digit', second: '2-digit' }) }}
+                </span>
+                <span>
+                  {{ new Date(state.speedHistory[state.speedHistory.length - 1].time).toLocaleTimeString([], { minute: '2-digit', second: '2-digit' }) }}
+                </span>
+              </div>
+            </div>
             <!-- 时间信息行 -->
             <div class="time-info-row">
               <!-- 已耗时 (始终显示) -->
@@ -1354,6 +1569,112 @@ function handleReset() {
     opacity: 1;
     transform: translateY(0);
     max-height: 100px;
+  }
+}
+/* 图表容器优化 */
+.chart-container {
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 20px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02);
+  position: relative; /* 为 tooltip 定位参考 */
+  animation: fadeIn 0.3s ease-in-out;
+
+  .chart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 0.85rem;
+    flex-wrap: wrap;
+    gap: 5px;
+
+    .chart-title {
+      font-weight: 600;
+      color: #606266;
+    }
+
+    .chart-max {
+      color: #909399;
+      font-size: 0.8rem;
+
+      b {
+        color: #67C23A;
+        font-weight: 700;
+      }
+
+      .hover-info {
+        color: #409EFF;
+        margin-left: 8px;
+        font-weight: 600;
+        animation: fadeIn 0.2s;
+      }
+    }
+  }
+
+  .chart-body {
+    height: 70px; /* 稍微增高一点 */
+    width: 100%;
+    position: relative;
+    cursor: crosshair; /* 鼠标变为十字准星 */
+
+    .sparkline {
+      width: 100%;
+      height: 100%;
+      display: block;
+      overflow: visible;
+    }
+  }
+
+  /* 横坐标轴 */
+  .chart-axis {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 6px;
+    font-size: 0.7rem;
+    color: #c0c4cc;
+    padding: 0 2px;
+  }
+
+  /* 【新增】Tooltip 样式 */
+  .chart-tooltip {
+    position: fixed; /* 使用 fixed 防止溢出容器 */
+    z-index: 9999;
+    background: rgba(30, 30, 30, 0.95);
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    pointer-events: none; /* 鼠标穿透 */
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    backdrop-filter: blur(4px);
+    transform: translateX(-50%); /* 居中 */
+    white-space: nowrap;
+    border: 1px solid rgba(255,255,255,0.1);
+
+    .tooltip-time {
+      color: #a0cfff;
+      font-size: 0.75rem;
+      margin-bottom: 4px;
+      text-align: center;
+    }
+
+    .tooltip-speed {
+      font-weight: 700;
+      font-size: 1rem;
+      color: #67C23A;
+      text-align: center;
+    }
+
+    .tooltip-mbps {
+      font-size: 0.7rem;
+      color: #ddd;
+      text-align: center;
+      margin-top: 2px;
+      font-family: monospace;
+    }
   }
 }
 </style>
