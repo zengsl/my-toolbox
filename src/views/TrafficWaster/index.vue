@@ -240,6 +240,51 @@ function copyExampleUrl() {
 }
 
 // ==========================================
+// 【核心新增】Media Session API (灵动岛/锁屏显示)
+// ==========================================
+
+// 更新锁屏/灵动岛显示的元数据
+function updateMediaMetadata(speedStr: string, isRunning: boolean) {
+  if (!('mediaSession' in navigator))
+    return
+
+  const title = isRunning ? `⬇️ ${speedStr}` : '已暂停'
+  const artist = '流量消耗器'
+  const album = isRunning ? '后台运行中' : '等待启动'
+
+  // 生成动态封面 (使用 Canvas 绘制简单图标)
+  const canvas = document.createElement('canvas')
+  canvas.width = 512
+  canvas.height = 512
+  const ctx = canvas.getContext('2d')
+  if (ctx) {
+    ctx.fillStyle = isRunning ? '#409EFF' : '#909399'
+    ctx.fillRect(0, 0, 512, 512)
+    ctx.font = 'bold 60px Arial'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillStyle = '#ffffff'
+    ctx.fillText(isRunning ? 'DOWNLOAD' : 'PAUSED', 256, 256)
+  }
+  const artwork = canvas.toDataURL('image/png')
+
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title,
+      artist,
+      album,
+      artwork: [
+        { src: artwork, sizes: '512x512', type: 'image/png' },
+      ],
+    })
+    navigator.mediaSession.playbackState = isRunning ? 'playing' : 'paused'
+  }
+  catch (e) {
+    console.warn('MediaMetadata 设置失败', e)
+  }
+}
+
+// ==========================================
 // 【核心新增】音频中断监听与自动恢复逻辑
 // ==========================================
 function setupAudioInterruptionListener() {
@@ -251,7 +296,7 @@ function setupAudioInterruptionListener() {
     if (!audioContext)
       return
 
-    console.log(`🎵 AudioContext 状态变更: ${audioContext.state}`)
+    console.log(`🎵 AudioContext 状态变更：${audioContext.state}`)
 
     if (audioContext.state === 'suspended') {
       // 被系统打断 (如播放音乐、来电)
@@ -259,9 +304,10 @@ function setupAudioInterruptionListener() {
       isAudioPlaying = false
       console.warn('⚠️ 音频被系统打断，下载任务可能即将暂停')
 
-      // 可选：此时可以主动暂停下载任务以节省资源，或者等待 visibilitychange 处理
-      // 这里选择不主动暂停，让 logic.ts 里的 fetch 超时或错误来处理，
-      // 或者依赖 visibilitychange 回来时的恢复逻辑。
+      // 更新锁屏状态为暂停
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'paused'
+      }
     }
     else if (audioContext.state === 'running') {
       // 恢复运行
@@ -270,14 +316,16 @@ function setupAudioInterruptionListener() {
         isAudioInterrupted = false
         isAudioPlaying = true
 
+        // 更新锁屏状态
+        if ('mediaSession' in navigator) {
+          navigator.mediaSession.playbackState = 'playing'
+          updateMediaMetadata(formatSpeed(currentSpeed.value), status.value === 'running')
+        }
+
         // 如果此时下载任务是 paused 状态 (因为后台挂起)，尝试自动恢复
         if (status.value === 'paused' && !isRunningState.value && state.status === 'paused') {
-          // 注意：这里不能直接调用 start()，因为 start() 有内部逻辑判断
-          // 我们模拟用户点击“继续”
           if (isMobile.value && isIOSBackgroundEnabled.value) {
-            // 仅在 iOS 后台模式下自动恢复
             console.log('⚡ 尝试自动恢复下载任务...')
-            // 调用 logic 中的 start (它内部处理了 resume 逻辑)
             start()
           }
         }
@@ -307,7 +355,6 @@ function handleVisibilityChange() {
 
     // 如果任务是因为后台挂起而暂停，且音频正常，尝试恢复下载
     if (status.value === 'paused' && state.status === 'paused' && !isAudioInterrupted) {
-      // 防止重复启动，check logic inside start()
       console.log('👉 页面激活，尝试恢复下载...')
       start()
     }
@@ -333,6 +380,12 @@ onMounted(() => {
     }
     else {
       avgSpeed.value = 0
+    }
+
+    // 【新增】如果开启了后台保活，实时更新锁屏/灵动岛显示的速度
+    if (isIOSBackgroundEnabled.value && 'mediaSession' in navigator) {
+      const isRunning = newState.status === 'running'
+      updateMediaMetadata(formatSpeed(newState.currentSpeed), isRunning)
     }
   })
 
@@ -361,6 +414,12 @@ onUnmounted(() => {
   audioSource = null
   isAudioPlaying = false
 
+  // 清理 Media Session
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.metadata = null
+    navigator.mediaSession.playbackState = 'none'
+  }
+
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   window.removeEventListener('resize', checkMobile)
 })
@@ -384,7 +443,7 @@ const elapsedTimeStr = computed(() => {
     endTime = state.lastCheckTime
   }
   else if (isFinishedState && !state.lastCheckTime) {
-    // 极端情况：如果刚启动就报错没有 lastCheckTime， fallback 到 startTime
+    // 极端情况：如果刚启动就报错没有 lastCheckTime，fallback 到 startTime
     endTime = state.startTime
   }
 
@@ -417,6 +476,13 @@ function toggleIOSBackground(enabled?: boolean) {
   if (!shouldEnable) {
     if (audioContext)
       audioContext.suspend()
+
+    // 清理 Media Session
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = 'none'
+      navigator.mediaSession.metadata = null
+    }
+
     isAudioPlaying = false
     isAudioInterrupted = false
     return
@@ -442,7 +508,30 @@ function toggleIOSBackground(enabled?: boolean) {
       audioSource.start(0)
       isAudioPlaying = true
       isAudioInterrupted = false
-      ElMessage.success('iOS 后台保活已开启 (静音音频)')
+
+      // 【新增】初始化 Media Session 控制
+      if ('mediaSession' in navigator) {
+        updateMediaMetadata(formatSpeed(currentSpeed.value), status.value === 'running')
+
+        // 绑定锁屏/控制中心的播放按钮
+        navigator.mediaSession.setActionHandler('play', () => {
+          if (status.value === 'paused' || status.value === 'idle') {
+            handleStart()
+          }
+          else if (audioContext?.state === 'suspended') {
+            audioContext.resume()
+          }
+          updateMediaMetadata(formatSpeed(currentSpeed.value), true)
+        })
+
+        // 绑定锁屏/控制中心的暂停按钮
+        navigator.mediaSession.setActionHandler('pause', () => {
+          handlePauseToggle()
+          updateMediaMetadata(formatSpeed(currentSpeed.value), false)
+        })
+      }
+
+      ElMessage.success('iOS 后台保活已开启 (含锁屏/灵动岛显示)')
     }
   }
   catch (e) {
@@ -576,6 +665,11 @@ function handleReset() {
   reset()
   ElMessage.success('数据已重置')
 }
+
+// 图表相关变量 (原代码中缺失，补充以防报错)
+const hoverIndex = ref<number | null>(null)
+const tooltipPos = ref({ x: 0, y: 0 })
+const isChartHovered = ref(false)
 </script>
 
 <template>
@@ -707,7 +801,7 @@ function handleReset() {
                   <el-icon>
                     <Cellphone />
                   </el-icon>
-                  开启后播放静音音频以防止 Safari 挂起页面
+                  开启后播放静音音频，并在锁屏/灵动岛显示速度
                 </div>
               </div>
             </el-form-item>
@@ -841,21 +935,6 @@ function handleReset() {
               </el-col>
             </el-row>
 
-            <!-- 【新增】图表控制栏 -->
-            <!--            <div class="chart-control-bar">
-              <span class="control-label">
-                <el-icon><TrendCharts /></el-icon>
-                实时速率图表
-              </span>
-              <el-switch
-                v-model="showChart"
-                inline-prompt
-                active-text="开"
-                inactive-text="关"
-                size="small"
-                style="&#45;&#45;el-switch-on-color: #13ce66; &#45;&#45;el-switch-off-color: #909399"
-              />
-            </div> -->
             <!-- 【优化版】速率趋势图表区域 -->
             <div v-if="showChart && state.speedHistory && state.speedHistory.length > 0" class="chart-container">
               <div class="chart-header">
