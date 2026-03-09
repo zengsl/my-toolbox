@@ -1,3 +1,12 @@
+<script setup lang="ts">
+import { House, Shop, Tools, Wallet } from '@element-plus/icons-vue'
+import { computed } from 'vue'
+import { useRoute } from 'vue-router'
+
+const route = useRoute()
+const activeIndex = computed(() => route.path as string)
+</script>
+
 <template>
   <el-container class="layout-container">
     <el-aside width="250px" class="sidebar">
@@ -7,12 +16,12 @@
       </div>
 
       <el-menu
-          :default-active="activeIndex"
-          class="side-menu"
-          background-color="#ffffff"
-          text-color="#4b5563"
-          active-text-color="#4f46e5"
-          router
+        :default-active="activeIndex"
+        class="side-menu"
+        background-color="#ffffff"
+        text-color="#4b5563"
+        active-text-color="#4f46e5"
+        router
       >
         <el-menu-item index="/">
           <el-icon><House /></el-icon>
@@ -36,15 +45,6 @@
     </el-main>
   </el-container>
 </template>
-
-<script setup lang="ts">
-import { computed } from 'vue'
-import { useRoute } from 'vue-router'
-import { Tools, House, Wallet, Shop } from '@element-plus/icons-vue'
-
-const route = useRoute()
-const activeIndex = computed(() => route.path as string)
-</script>
 
 <style scoped lang="scss">
 .layout-container {
