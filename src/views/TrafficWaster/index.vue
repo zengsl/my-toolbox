@@ -15,10 +15,10 @@ import {
   Warning,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-// 脚本部分完全保持原样，未做任何修改
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useTrafficWaster } from './logic'
 
+// ... (接口定义保持不变) ...
 interface UrlOption {
   label: string
   value: string
@@ -99,7 +99,13 @@ const totalDownloaded = ref(0); const currentSpeed = ref(0); const activeThreads
 const status = ref<typeof state.status>('idle')
 const requestCount = ref(0); const errorCount = ref(0); const lastError = ref<string | null>(null); const avgSpeed = ref(0)
 const isIOSBackgroundEnabled = ref(initBackground)
-let audioContext: AudioContext | null = null; let audioSource: AudioBufferSourceNode | null = null; let isAudioPlaying = false
+
+// 【修改点】音频相关变量
+let audioContext: AudioContext | null = null
+let audioSource: AudioBufferSourceNode | null = null
+let isAudioPlaying = false
+let isAudioInterrupted = false // 标记是否被系统打断
+
 let timerInterval: number | null = null
 const currentTime = ref(Date.now())
 let unsubscribe: (() => void) | null = null
@@ -124,7 +130,6 @@ const displayTarget = computed(() => {
 const exampleUrl = computed(() => {
   const origin = window.location.origin
   const path = window.location.pathname
-
   let targetParam = '1'
   if (selectedTargetMode.value === 'infinity')
     targetParam = 'infinity'
@@ -133,9 +138,8 @@ const exampleUrl = computed(() => {
   else targetParam = String(selectedTargetMode.value)
 
   let resourceParam = selectedUrlMode.value
-  if (!Object.keys(urlMap).includes(selectedUrlMode.value)) {
+  if (!Object.keys(urlMap).includes(selectedUrlMode.value))
     resourceParam = 'yd1'
-  }
 
   const params = new URLSearchParams({
     target: targetParam,
@@ -144,7 +148,6 @@ const exampleUrl = computed(() => {
     background: isIOSBackgroundEnabled.value ? 'true' : 'false',
     resource: resourceParam,
   })
-
   return `${origin}${path}?${params.toString()}`
 })
 
@@ -153,9 +156,85 @@ function copyExampleUrl() {
   ElMessage.success('当前配置链接已复制！')
 }
 
+// ==========================================
+// 【核心新增】音频中断监听与自动恢复逻辑
+// ==========================================
+function setupAudioInterruptionListener() {
+  if (!audioContext)
+    return
+
+  // 监听 AudioContext 状态变化 (iOS 打断时会变为 suspended)
+  const handleStateChange = async () => {
+    if (!audioContext)
+      return
+
+    console.log(`🎵 AudioContext 状态变更: ${audioContext.state}`)
+
+    if (audioContext.state === 'suspended') {
+      // 被系统打断 (如播放音乐、来电)
+      isAudioInterrupted = true
+      isAudioPlaying = false
+      console.warn('⚠️ 音频被系统打断，下载任务可能即将暂停')
+
+      // 可选：此时可以主动暂停下载任务以节省资源，或者等待 visibilitychange 处理
+      // 这里选择不主动暂停，让 logic.ts 里的 fetch 超时或错误来处理，
+      // 或者依赖 visibilitychange 回来时的恢复逻辑。
+    }
+    else if (audioContext.state === 'running') {
+      // 恢复运行
+      if (isAudioInterrupted) {
+        console.log('✅ 音频已恢复，检查下载任务...')
+        isAudioInterrupted = false
+        isAudioPlaying = true
+
+        // 如果此时下载任务是 paused 状态 (因为后台挂起)，尝试自动恢复
+        if (status.value === 'paused' && !isRunningState.value && state.status === 'paused') {
+          // 注意：这里不能直接调用 start()，因为 start() 有内部逻辑判断
+          // 我们模拟用户点击“继续”
+          if (isMobile.value && isIOSBackgroundEnabled.value) {
+            // 仅在 iOS 后台模式下自动恢复
+            console.log('⚡ 尝试自动恢复下载任务...')
+            // 调用 logic 中的 start (它内部处理了 resume 逻辑)
+            start()
+          }
+        }
+      }
+    }
+  }
+
+  // iOS Safari 需要监听这个事件
+  audioContext.onstatechange = handleStateChange
+}
+
+// 监听页面可见性变化 (配合音频恢复)
+function handleVisibilityChange() {
+  if (!document.hidden) {
+    console.log('👁️ 页面回到前台')
+
+    // 如果音频被打断且处于 suspended 状态，尝试恢复音频
+    if (audioContext && audioContext.state === 'suspended' && isIOSBackgroundEnabled.value) {
+      console.log('🔄 尝试恢复 AudioContext...')
+      audioContext.resume().then(() => {
+        console.log('✅ AudioContext 恢复成功')
+        // onstatechange 会触发后续的下载恢复逻辑
+      }).catch((err) => {
+        console.error('❌ AudioContext 恢复失败', err)
+      })
+    }
+
+    // 如果任务是因为后台挂起而暂停，且音频正常，尝试恢复下载
+    if (status.value === 'paused' && state.status === 'paused' && !isAudioInterrupted) {
+      // 防止重复启动，check logic inside start()
+      console.log('👉 页面激活，尝试恢复下载...')
+      start()
+    }
+  }
+}
+
 onMounted(() => {
   checkMobile()
   window.addEventListener('resize', checkMobile)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
 
   unsubscribe = subscribe((newState) => {
     totalDownloaded.value = newState.totalDownloaded
@@ -173,22 +252,33 @@ onMounted(() => {
       avgSpeed.value = 0
     }
   })
+
   timerInterval = window.setInterval(() => {
     currentTime.value = Date.now()
   }, 1000)
+
   if (initAutoStart)
     setTimeout(handleStart, 500)
   if (initBackground)
     toggleIOSBackground(true)
 })
+
 onUnmounted(() => {
   if (unsubscribe)
     unsubscribe()
   if (timerInterval)
     clearInterval(timerInterval)
   stop()
-  if (audioContext)
+
+  // 清理音频
+  if (audioContext) {
     audioContext.close()
+    audioContext = null
+  }
+  audioSource = null
+  isAudioPlaying = false
+
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
   window.removeEventListener('resize', checkMobile)
 })
 
@@ -222,17 +312,26 @@ function formatDuration(ms: number) {
 
 function toggleIOSBackground(enabled?: boolean) {
   const shouldEnable = enabled !== undefined ? enabled : isIOSBackgroundEnabled.value
+
   if (!shouldEnable) {
     if (audioContext)
       audioContext.suspend()
     isAudioPlaying = false
+    isAudioInterrupted = false
     return
   }
+
   try {
-    if (!audioContext)
+    if (!audioContext) {
       audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
-    if (audioContext.state === 'suspended')
+      // 【关键】注册监听器
+      setupAudioInterruptionListener()
+    }
+
+    if (audioContext.state === 'suspended') {
       audioContext.resume()
+    }
+
     if (!isAudioPlaying) {
       const buffer = audioContext.createBuffer(1, audioContext.sampleRate * 2, audioContext.sampleRate)
       audioSource = audioContext.createBufferSource()
@@ -241,11 +340,13 @@ function toggleIOSBackground(enabled?: boolean) {
       audioSource.connect(audioContext.destination)
       audioSource.start(0)
       isAudioPlaying = true
-      ElMessage.success('iOS 后台保活已开启')
+      isAudioInterrupted = false
+      ElMessage.success('iOS 后台保活已开启 (静音音频)')
     }
   }
   catch (e) {
-    ElMessage.warning('无法启动后台保活，请先与页面交互')
+    console.error(e)
+    ElMessage.warning('无法启动后台保活，请先与页面交互或浏览器不支持')
     isIOSBackgroundEnabled.value = false
   }
 }
@@ -259,9 +360,8 @@ function normalizeUrl(url: string) {
   if (!u.startsWith('http://') && !u.startsWith('https://'))
     u = `https://${u}`
   u = u.trim()
-  if (u.includes('speed.cloudflare.com')) {
+  if (u.includes('speed.cloudflare.com'))
     return u
-  }
   return `${CORS_PROXY_PREFIX}${encodeURIComponent(u)}`
 }
 
@@ -284,8 +384,6 @@ function handleUrlModeChange(v: string) {
   }
 }
 function handleCustomUrlInput(v: string) {
-  // const u = normalizeUrl(v);
-  // 输入链接也直接请求
   const u = v
   config.resourceUrlInput = u
   updateConfig('resourceUrl', u)
@@ -334,8 +432,11 @@ const customProgressColor = computed(() => {
 const startTimeStr = computed(() => state.startTime ? new Date(state.startTime).toLocaleTimeString() : '-')
 
 function handleStart() {
-  if (/iPad|iPhone|iPod/.test(navigator.userAgent) && isIOSBackgroundEnabled.value)
+  if (/iPad|iPhone|iPod/.test(navigator.userAgent) && isIOSBackgroundEnabled.value) {
+    // 确保音频正在播放
     toggleIOSBackground(true)
+  }
+
   if (selectedUrlMode.value === 'custom' && !config.customUrlInput.trim()) {
     ElMessage.warning('请输入自定义资源 URL')
     return
@@ -346,12 +447,14 @@ function handleStart() {
     ElMessage.warning('资源 URL 不能为空')
     return
   }
+
   requestCount.value = 0
   errorCount.value = 0
   lastError.value = null
   start()
   ElMessage.success(effectiveTargetGB.value === 'infinity' ? '任务已启动 (无限制)' : '任务已启动')
 }
+
 function handlePauseToggle() {
   if (status.value === 'running') {
     pause()
@@ -362,10 +465,12 @@ function handlePauseToggle() {
     ElMessage.success('任务已继续')
   }
 }
+
 function handleStop() {
   stop()
   ElMessage.warning('任务已停止')
 }
+
 function handleReset() {
   reset()
   ElMessage.success('数据已重置')
