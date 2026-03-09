@@ -58,7 +58,7 @@ function parseTargetParam(v: string | null) {
 }
 function parseThreadsParam(v: string | null) {
   if (!v)
-    return 2
+    return 6
   const n = Number.parseInt(v, 10)
   return isNaN(n) || n < 1 ? 2 : n
 }
