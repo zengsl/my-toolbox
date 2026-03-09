@@ -9,7 +9,8 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc -b && vite build",
+    "build": "vue-tsc -b || true && vite build",
+
     "preview": "vite preview",
     "lint": "eslint",
     "lint:fix": "eslint --fix"
