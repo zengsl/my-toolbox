@@ -16,6 +16,9 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+// 【新增】引入保活工具
+import { isKeepAliveActive, startKeepAlive, stopKeepAlive, updateKeepAliveStatus } from '@/utils/iosKeepAlive'
+// 【新增】引入保活工具
 import { useTrafficWaster } from './logic'
 
 // ... (接口定义保持不变) ...
@@ -48,20 +51,23 @@ const urlMap: Record<string, string> = {
 }
 
 const getQueryParam = (p: string) => new URLSearchParams(window.location.search).get(p)
+
 function parseTargetParam(v: string | null) {
   if (!v)
     return 1
   if (v.toLowerCase() === 'infinity' || v === '0')
     return 'infinity'
   const n = Number.parseFloat(v)
-  return isNaN(n) ? 1 : n
+  return Number.isNaN(n) ? 1 : n
 }
+
 function parseThreadsParam(v: string | null) {
   if (!v)
     return 6
   const n = Number.parseInt(v, 10)
-  return isNaN(n) || n < 1 ? 2 : n
+  return Number.isNaN(n) || n < 1 ? 2 : n
 }
+
 const parseBoolParam = (v: string | null) => v === 'true' || v === '1'
 
 const initTarget = parseTargetParam(getQueryParam('target'))
@@ -95,16 +101,15 @@ const config = reactive<LocalConfig>({
   resourceUrlInput: initResourceUrl,
 })
 
-const totalDownloaded = ref(0); const currentSpeed = ref(0); const activeThreads = ref(0)
+const totalDownloaded = ref(0)
+const currentSpeed = ref(0)
+const activeThreads = ref(0)
 const status = ref<typeof state.status>('idle')
-const requestCount = ref(0); const errorCount = ref(0); const lastError = ref<string | null>(null); const avgSpeed = ref(0)
+const requestCount = ref(0)
+const errorCount = ref(0)
+const lastError = ref<string | null>(null)
+const avgSpeed = ref(0)
 const isIOSBackgroundEnabled = ref(initBackground)
-
-// 【修改点】音频相关变量
-let audioContext: AudioContext | null = null
-let audioSource: AudioBufferSourceNode | null = null
-let isAudioPlaying = false
-let isAudioInterrupted = false // 标记是否被系统打断
 
 let timerInterval: number | null = null
 const currentTime = ref(Date.now())
@@ -239,143 +244,6 @@ function copyExampleUrl() {
   ElMessage.success('当前配置链接已复制！')
 }
 
-// ==========================================
-// 【核心新增】Media Session API (灵动岛/锁屏显示)
-// ==========================================
-
-// 更新锁屏/灵动岛显示的元数据
-function updateMediaMetadata(speedStr: string, isRunning: boolean) {
-  if (!('mediaSession' in navigator))
-    return
-
-  const title = isRunning ? `⬇️ ${speedStr}` : '已暂停'
-  const artist = '流量消耗器 Pro' // 改个名字试试
-  const album = isRunning ? `正在下载... ${formatSize(totalDownloaded.value)}` : '等待中' // 把总流量也放进去
-
-  // 生成动态封面 (保持高对比度)
-  const canvas = document.createElement('canvas')
-  canvas.width = 512
-  canvas.height = 512
-  const ctx = canvas.getContext('2d')
-  if (ctx) {
-    // 背景色
-    ctx.fillStyle = isRunning ? '#007AFF' : '#8E8E93'
-    ctx.fillRect(0, 0, 512, 512)
-
-    // 绘制文字
-    ctx.font = 'bold 80px San Francisco, Arial'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillStyle = '#ffffff'
-    ctx.fillText(isRunning ? 'DOWNLOAD' : 'PAUSED', 256, 200)
-
-    ctx.font = '60px San Francisco, Arial'
-    ctx.fillText(speedStr, 256, 300)
-  }
-  const artwork = canvas.toDataURL('image/png')
-
-  try {
-    const metadata = new MediaMetadata({
-      title,
-      artist,
-      album,
-      artwork: [
-        { src: artwork, sizes: '96x96', type: 'image/png' },
-        { src: artwork, sizes: '128x128', type: 'image/png' },
-        { src: artwork, sizes: '192x192', type: 'image/png' },
-        { src: artwork, sizes: '256x256', type: 'image/png' },
-        { src: artwork, sizes: '384x384', type: 'image/png' },
-        { src: artwork, sizes: '512x512', type: 'image/png' },
-      ],
-    })
-
-    navigator.mediaSession.metadata = metadata
-    navigator.mediaSession.playbackState = isRunning ? 'playing' : 'paused'
-
-    // 调试日志
-    // console.log('📱 锁屏元数据已更新:', title)
-  }
-  catch (e) {
-    console.warn('MediaMetadata 更新失败', e)
-  }
-}
-// ==========================================
-// 【核心新增】音频中断监听与自动恢复逻辑
-// ==========================================
-function setupAudioInterruptionListener() {
-  if (!audioContext)
-    return
-
-  // 监听 AudioContext 状态变化 (iOS 打断时会变为 suspended)
-  const handleStateChange = async () => {
-    if (!audioContext)
-      return
-
-    console.log(`🎵 AudioContext 状态变更：${audioContext.state}`)
-
-    if (audioContext.state === 'suspended') {
-      // 被系统打断 (如播放音乐、来电)
-      isAudioInterrupted = true
-      isAudioPlaying = false
-      console.warn('⚠️ 音频被系统打断，下载任务可能即将暂停')
-
-      // 更新锁屏状态为暂停
-      if ('mediaSession' in navigator) {
-        navigator.mediaSession.playbackState = 'paused'
-      }
-    }
-    else if (audioContext.state === 'running') {
-      // 恢复运行
-      if (isAudioInterrupted) {
-        console.log('✅ 音频已恢复，检查下载任务...')
-        isAudioInterrupted = false
-        isAudioPlaying = true
-
-        // 更新锁屏状态
-        if ('mediaSession' in navigator) {
-          navigator.mediaSession.playbackState = 'playing'
-          updateMediaMetadata(formatSpeed(currentSpeed.value), status.value === 'running')
-        }
-
-        // 如果此时下载任务是 paused 状态 (因为后台挂起)，尝试自动恢复
-        if (status.value === 'paused' && !isRunningState.value && state.status === 'paused') {
-          if (isMobile.value && isIOSBackgroundEnabled.value) {
-            console.log('⚡ 尝试自动恢复下载任务...')
-            start()
-          }
-        }
-      }
-    }
-  }
-
-  // iOS Safari 需要监听这个事件
-  audioContext.onstatechange = handleStateChange
-}
-
-// 监听页面可见性变化 (配合音频恢复)
-function handleVisibilityChange() {
-  if (!document.hidden) {
-    console.log('👁️ 页面回到前台')
-
-    // 如果音频被打断且处于 suspended 状态，尝试恢复音频
-    if (audioContext && audioContext.state === 'suspended' && isIOSBackgroundEnabled.value) {
-      console.log('🔄 尝试恢复 AudioContext...')
-      audioContext.resume().then(() => {
-        console.log('✅ AudioContext 恢复成功')
-        // onstatechange 会触发后续的下载恢复逻辑
-      }).catch((err) => {
-        console.error('❌ AudioContext 恢复失败', err)
-      })
-    }
-
-    // 如果任务是因为后台挂起而暂停，且音频正常，尝试恢复下载
-    if (status.value === 'paused' && state.status === 'paused' && !isAudioInterrupted) {
-      console.log('👉 页面激活，尝试恢复下载...')
-      start()
-    }
-  }
-}
-
 onMounted(() => {
   checkMobile()
   window.addEventListener('resize', checkMobile)
@@ -389,6 +257,7 @@ onMounted(() => {
     requestCount.value = newState.requestCount
     errorCount.value = newState.errorCount
     lastError.value = newState.lastError
+
     if (newState.startTime) {
       const d = (Date.now() - newState.startTime) / 1000
       avgSpeed.value = d > 0 ? newState.totalDownloaded / d : 0
@@ -397,11 +266,15 @@ onMounted(() => {
       avgSpeed.value = 0
     }
 
-    // 【新增】如果开启了后台保活，实时更新锁屏/灵动岛显示的速度
-    if (isIOSBackgroundEnabled.value && 'mediaSession' in navigator) {
+    // 【新增】如果开启了保活，实时更新锁屏显示的速度
+    // 【关键修改】调用更新函数
+    if (isIOSBackgroundEnabled.value) {
       const isRunning = newState.status === 'running'
-      // 只有当状态变化或速度变化较大时才更新，避免过于频繁
-      updateMediaMetadata(formatSpeed(newState.currentSpeed), isRunning)
+      updateKeepAliveStatus(
+        formatSpeed(newState.currentSpeed),
+        newState.totalDownloaded,
+        isRunning,
+      )
     }
   })
 
@@ -422,19 +295,8 @@ onUnmounted(() => {
     clearInterval(timerInterval)
   stop()
 
-  // 清理音频
-  if (audioContext) {
-    audioContext.close()
-    audioContext = null
-  }
-  audioSource = null
-  isAudioPlaying = false
-
-  // 清理 Media Session
-  if ('mediaSession' in navigator) {
-    navigator.mediaSession.metadata = null
-    navigator.mediaSession.playbackState = 'none'
-  }
+  // 【清理】调用工具函数的停止方法
+  stopKeepAlive()
 
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   window.removeEventListener('resize', checkMobile)
@@ -481,152 +343,50 @@ const estimatedEndTimeStr = computed(() => {
     second: '2-digit',
   })
 })
+
 function formatDuration(ms: number) {
-  const s = Math.floor(ms / 1000); const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60); const sec = s % 60
+  const s = Math.floor(ms / 1000)
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
 }
 
-// 【新增】创建一个极低频、极低音量的振荡器，欺骗 iOS 显示锁屏控件
-// 【新增/确认存在】创建一个极低频、极低音量的振荡器
-function startBackgroundAudio() {
-  if (!audioContext || isAudioPlaying)
-    return
-
-  try {
-    // 1. 创建振荡器 (产生正弦波)
-    const oscillator = audioContext.createOscillator()
-    oscillator.type = 'sine'
-    oscillator.frequency.value = 40 // 40Hz，人耳很难听到的低频
-
-    // 2. 创建增益节点 (控制音量)
-    const gainNode = audioContext.createGain()
-    gainNode.gain.value = 0.005 // 音量设为 0.5%，几乎听不见，但不是 0
-
-    // 3. 连接节点
-    oscillator.connect(gainNode)
-    gainNode.connect(audioContext.destination)
-
-    // 4. 开始播放
-    oscillator.start(0)
-
-    // 保存引用 (注意类型转换，因为原变量可能是 BufferSourceNode 类型)
-    audioSource = oscillator as any
-    isAudioPlaying = true
-    isAudioInterrupted = false
-
-    console.log('✅ 后台保活音频已启动 (40Hz 低频波)')
-  }
-  catch (e) {
-    console.error('❌ 启动背景音频失败', e)
-    isAudioPlaying = false
-  }
-}
-
+/**
+ * 切换 iOS 后台保活开关
+ */
 function toggleIOSBackground(enabled?: boolean) {
   const shouldEnable = enabled !== undefined ? enabled : isIOSBackgroundEnabled.value
-
   if (!shouldEnable) {
-    // --- 关闭逻辑 ---
-    if (audioContext) {
-      audioContext.suspend()
-      if (audioSource) {
-        try {
-          audioSource.stop()
-          audioSource.disconnect()
-        }
-        catch (e) {}
-        audioSource = null
-      }
-    }
-
-    if ('mediaSession' in navigator) {
-      navigator.mediaSession.playbackState = 'none'
-      setTimeout(() => {
-        if (!isIOSBackgroundEnabled.value)
-          navigator.mediaSession.metadata = null
-      }, 1000)
-    }
-
-    isAudioPlaying = false
-    isAudioInterrupted = false
+    stopKeepAlive()
     return
   }
-
-  // --- 开启逻辑 ---
   try {
-    if (!audioContext) {
-      audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
-      setupAudioInterruptionListener()
-    }
-
-    // 【修复点】不再使用 await，而是使用 .then() 链式调用
-    const resumePromise = audioContext.state === 'suspended'
-      ? audioContext.resume()
-      : Promise.resolve()
-
-    resumePromise.then(() => {
-      if (!isAudioPlaying) {
-        startBackgroundAudio() // 启动低频波音频
-
-        // 初始化 Media Session
-        if ('mediaSession' in navigator) {
-          updateMediaMetadata(formatSpeed(currentSpeed.value), status.value === 'running')
-
-          navigator.mediaSession.setActionHandler('play', () => {
-            console.log('🎵 锁屏点击播放')
-            if (['paused', 'idle', 'stopped'].includes(status.value)) {
-              handleStart()
-            }
-            else if (audioContext?.state === 'suspended') {
-              audioContext.resume()
-            }
-            updateMediaMetadata(formatSpeed(currentSpeed.value), true)
-          })
-
-          navigator.mediaSession.setActionHandler('pause', () => {
-            console.log('🎵 锁屏点击暂停')
-            handlePauseToggle()
-            updateMediaMetadata(formatSpeed(currentSpeed.value), false)
-          })
-
-          navigator.mediaSession.setActionHandler('previoustrack', () => {})
-          navigator.mediaSession.setActionHandler('nexttrack', () => {})
-        }
-
-        ElMessage.success('iOS 后台保活已开启 (低频音频模式)')
-      }
-    }).catch((err) => {
-      console.error('❌ AudioContext 恢复失败', err)
-      ElMessage.warning('无法启动音频上下文')
-      isIOSBackgroundEnabled.value = false
+    startKeepAlive({
+      volume: 0.05,
+      onPlay: () => {
+        if (['paused', 'idle'].includes(status.value))
+          handleStart()
+      },
+      onPause: () => {
+        if (status.value === 'running')
+          handlePauseToggle()
+      },
     })
+    ElMessage.success('后台保活已开启')
   }
-  catch (e: any) {
-    console.error(e)
-    ElMessage.warning(`无法启动后台保活：${e.message}`)
+  catch (e) {
+    ElMessage.warning('启动失败，请点击页面后再试')
     isIOSBackgroundEnabled.value = false
   }
 }
-
-const CORS_PROXY_PREFIX = 'https://api.allorigins.win/raw?url='
-
-function normalizeUrl(url: string) {
-  if (!url)
-    return ''
-  let u = url.trim()
-  if (!u.startsWith('http://') && !u.startsWith('https://'))
-    u = `https://${u}`
-  u = u.trim()
-  if (u.includes('speed.cloudflare.com'))
-    return u
-  return `${CORS_PROXY_PREFIX}${encodeURIComponent(u)}`
-}
-
 function handleTargetModeChange(v: any) {
   selectedTargetMode.value = v
   updateConfig('targetGB', v === 'custom' ? customTargetValue.value : v)
 }
-const handleCustomTargetChange = (v: number) => updateConfig('targetGB', v)
+
+const handleCustomTargetChange = (v: number | undefined, p: number | undefined) => updateConfig('targetGB', v)
+
 function handleUrlModeChange(v: string) {
   if (v === 'custom') {
     if (!config.customUrlInput)
@@ -640,17 +400,20 @@ function handleUrlModeChange(v: string) {
     updateConfig('resourceUrl', cleanUrl)
   }
 }
+
 function handleCustomUrlInput(v: string) {
   const u = v
   config.resourceUrlInput = u
   updateConfig('resourceUrl', u)
 }
+
 function copyUrl() {
   if (!currentResourceUrl.value || currentResourceUrl.value === '未选择')
     return
   navigator.clipboard.writeText(currentResourceUrl.value)
   ElMessage.success('URL 已复制')
 }
+
 const progressPercent = computed(() => {
   const t = effectiveTargetGB.value
   if (t === 'infinity')
@@ -689,8 +452,8 @@ const customProgressColor = computed(() => {
 const startTimeStr = computed(() => state.startTime ? new Date(state.startTime).toLocaleTimeString() : '-')
 
 function handleStart() {
+  // 【关键】如果是 iOS 且开启了保活，先启动音频
   if (/iPad|iPhone|iPod/.test(navigator.userAgent) && isIOSBackgroundEnabled.value) {
-    // 确保音频正在播放
     toggleIOSBackground(true)
   }
 
@@ -737,6 +500,16 @@ function handleReset() {
 const hoverIndex = ref<number | null>(null)
 const tooltipPos = ref({ x: 0, y: 0 })
 const isChartHovered = ref(false)
+
+function handleVisibilityChange() {
+  if (!document.hidden) {
+    console.log('👁️ 页面回到前台')
+    // 使用 <audio> 标签通常会自动恢复，但如果发现暂停了，可以尝试提示用户
+    if (isIOSBackgroundEnabled.value && !isKeepAliveActive()) {
+      console.log('⚠️ 检测到保活中断，可能需要用户再次交互')
+    }
+  }
+}
 </script>
 
 <template>
@@ -1094,10 +867,17 @@ const isChartHovered = ref(false)
               <!-- 横坐标时间轴 (简化版：显示开始和结束时间) -->
               <div class="chart-axis">
                 <span v-if="state.speedHistory.length > 1">
-                  {{ new Date(state.speedHistory[0].time).toLocaleTimeString([], { minute: '2-digit', second: '2-digit' }) }}
+                  {{
+                    new Date(state.speedHistory[0].time).toLocaleTimeString([], { minute: '2-digit', second: '2-digit' })
+                  }}
                 </span>
                 <span>
-                  {{ new Date(state.speedHistory[state.speedHistory.length - 1].time).toLocaleTimeString([], { minute: '2-digit', second: '2-digit' }) }}
+                  {{
+                    new Date(state.speedHistory[state.speedHistory.length - 1].time).toLocaleTimeString([], {
+                      minute: '2-digit',
+                      second: '2-digit',
+                    })
+                  }}
                 </span>
               </div>
             </div>
@@ -1146,7 +926,7 @@ const isChartHovered = ref(false)
                 :stroke-width="24"
                 :show-text="false"
                 :color="customProgressColor"
-                :status="status === 'error' ? 'exception' : (effectiveTargetGB === 'infinity' ? 'active' : undefined)"
+                :status="status === 'error' ? 'exception' : (effectiveTargetGB === 'infinity' ? 'success' : undefined)"
                 :indeterminate="effectiveTargetGB === 'infinity' && status === 'running'"
               />
             </div>
@@ -1375,6 +1155,7 @@ const isChartHovered = ref(false)
     }
   }
 }
+
 /* --- 核心修改结束 --- */
 
 .empty-state {
@@ -1717,6 +1498,7 @@ const isChartHovered = ref(false)
     max-height: 100px;
   }
 }
+
 /* 图表容器优化 */
 .chart-container {
   background: #fff;
@@ -1794,11 +1576,11 @@ const isChartHovered = ref(false)
     border-radius: 6px;
     font-size: 0.8rem;
     pointer-events: none; /* 鼠标穿透 */
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     backdrop-filter: blur(4px);
     transform: translateX(-50%); /* 居中 */
     white-space: nowrap;
-    border: 1px solid rgba(255,255,255,0.1);
+    border: 1px solid rgba(255, 255, 255, 0.1);
 
     .tooltip-time {
       color: #a0cfff;
