@@ -1,39 +1,40 @@
 // src/utils/iosKeepAlive.ts
 
+/**
+ * iOS Safari 后台保活工具 (极简稳定版)
+ * 特性：
+ * 1. 封面固定不闪烁 (蓝色背景 + 文字)
+ * 2. 标题显示速度，专辑显示 "已消耗 / 目标"
+ * 3. 不依赖外部时间变量
+ */
+
 const AUDIO_ID = 'ios-bg-keepalive-audio'
 const DEFAULT_AUDIO_SRC = '/sounds/silent_loop.mp3'
 
+let STATIC_COVER_DATA_URI: string | null = null
+
 export interface KeepAliveOptions {
   volume?: number
-  titlePrefix?: string
-  artist?: string
   audioSrc?: string
   onPlay?: () => void
   onPause?: () => void
+  targetGB?: number | 'infinity'
 }
 
 interface KeepAliveState {
   audio: HTMLAudioElement | null
   isPlaying: boolean
-  lastCoverUpdate: number
-  lastSpeedStr: string
-  lastTotalStr: string
-  currentTitlePrefix: string
-  currentArtist: string
+  targetGB: number | 'infinity'
 }
 
 const state: KeepAliveState = {
   audio: null,
   isPlaying: false,
-  lastCoverUpdate: 0,
-  lastSpeedStr: '',
-  lastTotalStr: '',
-  currentTitlePrefix: '⬇️',
-  currentArtist: '流量消耗器',
+  targetGB: 'infinity',
 }
 
 /**
- * 格式化流量大小
+ * 格式化流量
  */
 function formatSize(bytes: number): string {
   if (bytes === 0)
@@ -45,9 +46,12 @@ function formatSize(bytes: number): string {
 }
 
 /**
- * 生成动态封面图 (Canvas)
+ * 生成静态封面 (只执行一次)
  */
-function generateArtwork(speedStr: string, totalStr: string, isRunning: boolean): string {
+function generateStaticCover(): string {
+  if (STATIC_COVER_DATA_URI)
+    return STATIC_COVER_DATA_URI
+
   const canvas = document.createElement('canvas')
   canvas.width = 512
   canvas.height = 512
@@ -56,125 +60,52 @@ function generateArtwork(speedStr: string, totalStr: string, isRunning: boolean)
   if (!ctx)
     return ''
 
-  // 背景色
-  ctx.fillStyle = isRunning ? '#007AFF' : '#8E8E93'
+  // 蓝色背景
+  ctx.fillStyle = '#007AFF'
   ctx.fillRect(0, 0, 512, 512)
 
-  // 状态文字
+  // 绘制简单图标 (下载箭头)
+  ctx.strokeStyle = '#ffffff'
+  ctx.lineWidth = 30
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+
+  ctx.beginPath()
+  ctx.moveTo(256, 180)
+  ctx.lineTo(256, 380)
+  ctx.moveTo(180, 300)
+  ctx.lineTo(256, 380)
+  ctx.lineTo(332, 300)
+  ctx.stroke()
+
+  // 底部文字
   ctx.fillStyle = '#ffffff'
   ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
+  ctx.font = 'bold 50px San Francisco, Arial'
+  ctx.fillText('DATA SAVER', 256, 460)
 
-  ctx.font = 'bold 60px San Francisco, Arial'
-  ctx.fillText(isRunning ? 'DOWNLOADING' : 'PAUSED', 256, 150)
-
-  // 速度大字
-  ctx.font = 'bold 70px San Francisco, Arial'
-  ctx.fillText(speedStr, 256, 260)
-
-  // 总量小字
-  ctx.font = '50px San Francisco, Arial'
-  ctx.fillStyle = 'rgba(255,255,255,0.9)'
-  ctx.fillText(`Total: ${totalStr}`, 256, 360)
-
-  return canvas.toDataURL('image/png')
+  STATIC_COVER_DATA_URI = canvas.toDataURL('image/png')
+  return STATIC_COVER_DATA_URI
 }
 
 /**
- * 【核心修复】显式导出 updateMetadata 函数
- * 用于更新锁屏/控制中心的元数据
- * @param speedStr 速度字符串
- * @param totalStr 总流量字符串
- * @param isRunning 是否运行中
- * @param titlePrefix 标题前缀
- * @param artist 艺术家
- * @param forceUpdateCover 是否强制更新封面 (跳过防抖)
- */
-export function updateMetadata(
-  speedStr: string,
-  totalStr: string,
-  isRunning: boolean,
-  titlePrefix: string = state.currentTitlePrefix,
-  artist: string = state.currentArtist,
-  forceUpdateCover: boolean = false,
-) {
-  if (!('mediaSession' in navigator))
-    return
-
-  // 更新状态缓存
-  state.currentTitlePrefix = titlePrefix
-  state.currentArtist = artist
-
-  // 1. 总是更新文本信息 (Title, Artist, Album) - 开销小，实时性强
-  const metadata: any = {
-    title: `${titlePrefix} ${speedStr}`,
-    artist,
-    album: `Total: ${totalStr}`,
-  }
-
-  // 2. 智能处理封面 (Artwork)
-  const now = Date.now()
-  const speedChanged = speedStr !== state.lastSpeedStr
-  const totalChanged = totalStr !== state.lastTotalStr
-  const timePassed = now - state.lastCoverUpdate > 3000 // 3秒防抖阈值
-
-  // 判断是否需要重新生成封面
-  const shouldUpdateCover = forceUpdateCover
-    || (state.lastSpeedStr === '') // 首次必须更新
-    || ((speedChanged || totalChanged) && timePassed)
-
-  if (shouldUpdateCover) {
-    try {
-      const artwork = generateArtwork(speedStr, totalStr, isRunning)
-      metadata.artwork = [
-        { src: artwork, sizes: '512x512', type: 'image/png' },
-      ]
-      state.lastCoverUpdate = now
-      state.lastSpeedStr = speedStr
-      state.lastTotalStr = totalStr
-    }
-    catch (e) {
-      console.warn('封面生成失败:', e)
-      // 如果生成失败，尝试保留旧的 artwork (如果 mediaSession 支持获取)
-      // 这里简单处理：不赋值 artwork 字段，浏览器通常会保留上一帧
-    }
-  }
-  else {
-    // 如果不更新封面，尝试从当前 session 获取旧的 artwork 保持引用
-    // 注意：MediaMetadata 是只读的，不能直接修改其 artwork 属性，必须重新 new
-    // 所以如果不生成新的，我们就不传 artwork 字段，依赖浏览器的行为保留旧图
-    // 但为了保险，如果浏览器不支持保留，我们至少保证文本更新了
-  }
-
-  // 应用元数据
-  try {
-    navigator.mediaSession.metadata = new MediaMetadata(metadata)
-    navigator.mediaSession.playbackState = isRunning ? 'playing' : 'paused'
-  }
-  catch (e) {
-    console.error('MediaSession 更新错误:', e)
-  }
-}
-
-/**
- * 启动后台保活
+ * 启动保活
  */
 export function startKeepAlive(options: KeepAliveOptions = {}) {
   const {
     volume = 0.05,
-    titlePrefix = '⬇️',
-    artist = '流量消耗器',
     audioSrc = DEFAULT_AUDIO_SRC,
     onPlay,
     onPause,
+    targetGB = 'infinity',
   } = options
 
-  // 如果已经在运行，尝试恢复播放并更新元数据
+  state.targetGB = targetGB
+
   if (state.isPlaying && state.audio) {
     if (state.audio.paused) {
       state.audio.play().catch(console.error)
     }
-    updateMetadata(state.lastSpeedStr || '0 B/s', state.lastTotalStr || '0 B', true, titlePrefix, artist, true)
     return
   }
 
@@ -193,9 +124,8 @@ export function startKeepAlive(options: KeepAliveOptions = {}) {
       audioEl.setAttribute('webkit-playsinline', 'true')
       document.body.appendChild(audioEl)
 
-      // 错误重试机制
       audioEl.addEventListener('error', () => {
-        console.warn('⚠️ 音频加载错误，尝试重载...')
+        console.warn('⚠️ 音频错误，重试...')
         if (audioEl) {
           audioEl.load()
           audioEl.play().catch(console.error)
@@ -215,13 +145,11 @@ export function startKeepAlive(options: KeepAliveOptions = {}) {
     if (playPromise !== undefined) {
       playPromise.then(() => {
         state.isPlaying = true
-        console.log('✅ 保活音频播放启动成功')
-
-        setupMediaSessionHandlers({ onPlay, onPause, titlePrefix, artist })
-        // 初始调用 updateMetadata
-        updateMetadata('0 B/s', '0 B', true, titlePrefix, artist, true)
+        console.log('✅ 保活启动 (静态封面)')
+        setupMediaSessionHandlers({ onPlay, onPause })
+        updateMetadata('0 B/s', '0 B', true)
       }).catch((err) => {
-        console.error('❌ 音频启动失败 (通常需要用户交互):', err)
+        console.error('❌ 启动失败:', err)
         state.isPlaying = false
         throw err
       })
@@ -234,21 +162,49 @@ export function startKeepAlive(options: KeepAliveOptions = {}) {
 }
 
 /**
- * 设置锁屏按钮回调
+ * 更新元数据核心函数
+ */
+function updateMetadata(speedStr: string, consumedStr: string, isRunning: boolean) {
+  if (!('mediaSession' in navigator))
+    return
+
+  const targetDisplay = state.targetGB === 'infinity' ? '∞' : `${state.targetGB} GB`
+  const albumText = `已消耗：${consumedStr} / 目标：${targetDisplay}`
+  const titleText = `${isRunning ? '⬇️' : '⏸️'} ${speedStr}`
+
+  // 艺术家字段：固定显示状态，不依赖时间变量
+  const artistText = isRunning ? 'Running' : 'Paused'
+
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: titleText,
+      artist: artistText,
+      album: albumText,
+      artwork: [
+        { src: generateStaticCover(), sizes: '512x512', type: 'image/png' },
+      ],
+    })
+    navigator.mediaSession.playbackState = isRunning ? 'playing' : 'paused'
+  }
+  catch (e) {
+    console.error('MediaSession 错误:', e)
+  }
+}
+
+/**
+ * 设置按钮回调
  */
 function setupMediaSessionHandlers(options: any) {
   if (!('mediaSession' in navigator))
     return
 
   navigator.mediaSession.setActionHandler('play', () => {
-    console.log('🎵 锁屏点击播放')
     if (state.audio && state.audio.paused) {
       state.audio.play().then(() => {
         state.isPlaying = true
         if (options.onPlay)
           options.onPlay()
-        updateMetadata(state.lastSpeedStr, state.lastTotalStr, true, options.titlePrefix, options.artist, true)
-      }).catch(err => console.error('恢复播放失败:', err))
+      }).catch(console.error)
     }
     else if (options.onPlay) {
       options.onPlay()
@@ -256,7 +212,6 @@ function setupMediaSessionHandlers(options: any) {
   })
 
   navigator.mediaSession.setActionHandler('pause', () => {
-    console.log('🎵 锁屏点击暂停')
     if (state.audio) {
       state.audio.pause()
       state.isPlaying = false
@@ -264,22 +219,27 @@ function setupMediaSessionHandlers(options: any) {
     if (options.onPause)
       options.onPause()
 
-    // 立即更新 UI 为暂停态 (强制刷新封面)
-    updateMetadata(state.lastSpeedStr, state.lastTotalStr, false, options.titlePrefix, options.artist, true)
-  })
-
-  navigator.mediaSession.setActionHandler('stop', () => {
-    console.log('🎵 锁屏点击停止')
-    if (options.onPause)
-      options.onPause()
-    // 停止通常意味着结束，这里可以选择是否彻底 stopKeepAlive
-    // 为了安全，我们只暂停业务，让用户自己关闭页面或切换
+    // 暂停时立即刷新状态
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = 'paused'
+      // 重新获取当前元数据中的文本进行更新 (保持数值不变，只变状态)
+      const currentMeta = navigator.mediaSession.metadata
+      if (currentMeta) {
+        // 这里简单处理，下次周期性调用会自动修正数值，这里只改状态图标
+        // 为了体验好，我们可以强制刷新一次 metadata
+        // 但由于拿不到具体的 speed/consumed 数值，这里依赖外部的周期性调用来修正显示
+        // 或者我们可以简单地把 title 改成 "⏸️ 已暂停"
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: '⏸️ 已暂停',
+          artist: 'Paused',
+          album: currentMeta.album, // 保留原有的消耗量显示
+          artwork: [{ src: generateStaticCover(), sizes: '512x512', type: 'image/png' }],
+        })
+      }
+    }
   })
 }
 
-/**
- * 停止后台保活
- */
 export function stopKeepAlive() {
   if (state.audio) {
     state.audio.pause()
@@ -288,37 +248,39 @@ export function stopKeepAlive() {
     state.audio = null
   }
   state.isPlaying = false
-  state.lastSpeedStr = ''
-  state.lastTotalStr = ''
 
   if ('mediaSession' in navigator) {
     navigator.mediaSession.playbackState = 'none'
     navigator.mediaSession.metadata = null
     navigator.mediaSession.setActionHandler('play', null)
     navigator.mediaSession.setActionHandler('pause', null)
-    navigator.mediaSession.setActionHandler('stop', null)
   }
-  console.log('🛑 保活已停止')
 }
 
 /**
- * 更新锁屏显示的状态 (供业务层周期性调用)
+ * 【对外接口】业务层调用
+ * @param currentSpeed 当前速度 (Bytes/s)
+ * @param totalDownloaded 已下载总量 (Bytes)
+ * @param isBusinessRunning 是否正在运行
  */
-export function updateKeepAliveStatus(currentSpeed: string, totalDownloadedBytes: number, isBusinessRunning: boolean) {
+export function updateKeepAliveStatus(
+  currentSpeed: number,
+  totalDownloaded: number,
+  isBusinessRunning: boolean,
+) {
   if (!('mediaSession' in navigator))
     return
 
-  const totalStr = formatSize(totalDownloadedBytes)
-  const titlePrefix = isBusinessRunning ? '⬇️' : '⏸️'
+  const speedStr = `${formatSize(currentSpeed)}/s`
+  const consumedStr = formatSize(totalDownloaded)
 
-  // 调用核心的 updateMetadata
-  // 注意：这里不强制 forceUpdateCover，让内部的防抖逻辑生效
-  updateMetadata(currentSpeed, totalStr, isBusinessRunning, titlePrefix, state.currentArtist)
+  updateMetadata(speedStr, consumedStr, isBusinessRunning)
 }
 
-/**
- * 检查保活是否激活
- */
+export function updateTarget(target: number | 'infinity') {
+  state.targetGB = target
+}
+
 export function isKeepAliveActive(): boolean {
   return state.isPlaying && !!state.audio && !state.audio.paused
 }

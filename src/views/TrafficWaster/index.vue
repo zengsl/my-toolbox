@@ -270,10 +270,12 @@ onMounted(() => {
     // 【关键修改】调用更新函数
     if (isIOSBackgroundEnabled.value) {
       const isRunning = newState.status === 'running'
+
       updateKeepAliveStatus(
-        formatSpeed(newState.currentSpeed),
-        newState.totalDownloaded,
-        isRunning,
+        newState.currentSpeed, // 1. 速度 (数字)
+        newState.totalDownloaded, // 2. 总量 (数字)
+        isRunning, // 3. 状态 (布尔)
+        // 不需要传第4个参数了！
       )
     }
   })
@@ -359,11 +361,15 @@ function toggleIOSBackground(enabled?: boolean) {
   const shouldEnable = enabled !== undefined ? enabled : isIOSBackgroundEnabled.value
   if (!shouldEnable) {
     stopKeepAlive()
+    ElMessage.info('后台保活已关闭')
     return
   }
+
   try {
     startKeepAlive({
       volume: 0.05,
+      // 如果您有 effectiveTargetGB 变量，就传它；否则直接传 'infinity'
+      targetGB: typeof effectiveTargetGB.value !== 'undefined' ? effectiveTargetGB.value : 'infinity',
       onPlay: () => {
         if (['paused', 'idle'].includes(status.value))
           handleStart()
@@ -376,10 +382,11 @@ function toggleIOSBackground(enabled?: boolean) {
     ElMessage.success('后台保活已开启')
   }
   catch (e) {
-    ElMessage.warning('启动失败，请点击页面后再试')
+    ElMessage.warning('启动失败，请点击页面交互')
     isIOSBackgroundEnabled.value = false
   }
 }
+
 function handleTargetModeChange(v: any) {
   selectedTargetMode.value = v
   updateConfig('targetGB', v === 'custom' ? customTargetValue.value : v)
