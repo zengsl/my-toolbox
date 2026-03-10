@@ -89,7 +89,8 @@ export function startKeepAlive(options: KeepAliveOptions = {}) {
   if (state.isPlaying && state.audio) {
     // 已经在运行，尝试恢复播放（防止被系统挂起）
     if (state.audio.paused) {
-      state.audio.play().catch(() => {})
+      state.audio.play().catch(() => {
+      })
     }
     return
   }
@@ -134,7 +135,7 @@ export function startKeepAlive(options: KeepAliveOptions = {}) {
         state.isPlaying = true
         console.log('✅ 保活音频播放中')
         setupMediaSessionHandlers({ onPlay, onPause, titlePrefix, artist })
-        updateMetadata('0 B/s', '0 B', true, titlePrefix, artist)
+        // updateMetadata('0 B/s', '0 B', true, titlePrefix, artist)
       }).catch((err) => {
         console.error('❌ 音频启动失败 (需用户交互):', err)
         state.isPlaying = false
@@ -163,7 +164,7 @@ function setupMediaSessionHandlers(options: any) {
         state.isPlaying = true
         if (options.onPlay)
           options.onPlay()
-        updateMetadata(state.lastSpeedStr, state.lastTotalStr, true, options.titlePrefix, options.artist)
+        // updateMetadata(state.lastSpeedStr, state.lastTotalStr, true, options.titlePrefix, options.artist)
       }).catch((err) => {
         console.error('恢复播放失败:', err)
         // 如果自动恢复失败，可能需要用户解锁屏幕操作

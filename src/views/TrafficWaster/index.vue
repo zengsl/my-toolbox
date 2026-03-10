@@ -373,10 +373,11 @@ function toggleIOSBackground(enabled?: boolean) {
           handlePauseToggle()
       },
     })
-    ElMessage.success('后台保活已开启')
+    // ElMessage.success('后台保活已开启')
   }
-  catch (e) {
+  catch (e: any) {
     ElMessage.warning('启动失败，请点击页面后再试')
+    console.error('保活失败', e)
     isIOSBackgroundEnabled.value = false
   }
 }
