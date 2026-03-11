@@ -1,3 +1,4 @@
+<!-- TrafficWaster/index.vue -->
 <script setup lang="ts">
 import type { InitialConfig } from './logic'
 import {
@@ -239,9 +240,78 @@ const exampleUrl = computed(() => {
   return `${origin}${path}?${params.toString()}`
 })
 
-function copyExampleUrl() {
-  navigator.clipboard.writeText(exampleUrl.value)
-  ElMessage.success('当前配置链接已复制！')
+// 复制文本的通用方法
+async function copyToClipboard(text) {
+  // 优先使用 Clipboard API（需要 HTTPS）
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text)
+      console.log('复制成功（使用Clipboard API）')
+      return true
+    }
+    catch (err) {
+      console.error('Clipboard API 复制失败:', err)
+      // 降级到传统方法
+      return fallbackCopyText(text)
+    }
+  }
+  else {
+    // 非 HTTPS 环境使用传统方法
+    return fallbackCopyText(text)
+  }
+}
+
+// 传统复制方法（兼容非 HTTPS）
+function fallbackCopyText(text) {
+  try {
+    // 创建临时textarea元素
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+
+    // 设置样式使其不可见
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    textarea.style.left = '-999999px'
+    textarea.style.top = '-999999px'
+
+    document.body.appendChild(textarea)
+
+    // 选择文本
+    textarea.focus()
+    textarea.select()
+
+    // 执行复制命令
+    const successful = document.execCommand('copy')
+
+    // 移除临时元素
+    document.body.removeChild(textarea)
+
+    if (successful) {
+      console.log('复制成功（使用传统方法）')
+      return true
+    }
+    else {
+      console.error('传统方法复制失败')
+      return false
+    }
+  }
+  catch (err) {
+    console.error('传统方法复制出错:', err)
+    return false
+  }
+}
+
+// 在你的方法中使用
+async function copyExampleUrl() {
+  const success = await copyToClipboard(exampleUrl.value)
+  if (success) {
+    // 显示成功提示
+    ElMessage.success('复制成功')
+  }
+  else {
+    // 显示失败提示，并提供手动复制的方式
+    ElMessage.warning('复制失败，请手动复制')
+  }
 }
 
 onMounted(() => {
@@ -268,10 +338,11 @@ onMounted(() => {
 
     // 【新增】如果开启了保活，实时更新锁屏显示的速度
     // 【关键修改】调用更新函数
+    // 在 subscribe 回调中
     if (isIOSBackgroundEnabled.value) {
       const isRunning = newState.status === 'running'
       updateKeepAliveStatus(
-        formatSpeed(newState.currentSpeed),
+        newState.currentSpeed,
         newState.totalDownloaded,
         isRunning,
       )
@@ -282,10 +353,11 @@ onMounted(() => {
     currentTime.value = Date.now()
   }, 1000)
 
-  if (initAutoStart)
-    setTimeout(handleStart, 500)
   if (initBackground)
     toggleIOSBackground(true)
+
+  if (initAutoStart)
+    setTimeout(handleStart, 500)
 })
 
 onUnmounted(() => {
@@ -364,6 +436,8 @@ function toggleIOSBackground(enabled?: boolean) {
   try {
     startKeepAlive({
       volume: 0.05,
+      // 确保这里传入了目标值，这样锁屏才能显示 "1.2G/10G"
+      targetGB: effectiveTargetGB.value,
       onPlay: () => {
         if (['paused', 'idle'].includes(status.value))
           handleStart()
@@ -373,14 +447,13 @@ function toggleIOSBackground(enabled?: boolean) {
           handlePauseToggle()
       },
     })
-    // ElMessage.success('后台保活已开启')
   }
   catch (e: any) {
     ElMessage.warning('启动失败，请点击页面后再试')
-    console.error('保活失败', e)
     isIOSBackgroundEnabled.value = false
   }
 }
+
 function handleTargetModeChange(v: any) {
   selectedTargetMode.value = v
   updateConfig('targetGB', v === 'custom' ? customTargetValue.value : v)
@@ -1006,12 +1079,14 @@ function handleVisibilityChange() {
   font-size: 0.9rem;
 }
 
+/* 让示例链接 Banner 紧贴顶部 (因为标题没了) */
 .example-banner {
   background: linear-gradient(135deg, #e0f2fe 0%, #f0f9ff 100%);
   border: 1px solid #bae6fd;
   border-radius: 8px;
   padding: 12px 16px;
-  margin-bottom: 20px;
+  margin-top: 0;
+  margin-bottom: 15px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1379,6 +1454,11 @@ function handleVisibilityChange() {
 }
 
 @media (max-width: 768px) {
+
+  .page-header {
+    display: none !important;
+  }
+
   .tool-page {
     padding: 0 5px;
   }
