@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import type { InitialConfig } from './logic'
 import {
+  ArrowRight,
   Cellphone,
   Clock,
   Close,
@@ -16,19 +17,14 @@ import {
   Warning,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-// 【新增】引入保活工具
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { isKeepAliveActive, startKeepAlive, stopKeepAlive, updateKeepAliveStatus } from '@/utils/iosKeepAlive'
-// 【新增】引入保活工具
 import { useTrafficWaster } from './logic'
 
-// ... (接口定义保持不变) ...
 interface UrlOption {
   label: string
   value: string
 }
-
-type ButtonType = 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
 interface LocalConfig {
   threads: number
@@ -116,115 +112,211 @@ let timerInterval: number | null = null
 const currentTime = ref(Date.now())
 let unsubscribe: (() => void) | null = null
 const isMobile = ref(false)
+const isBannerExpanded = ref(false)
+
+// --- 🚀 悬浮球逻辑 (核心功能) ---
+const showFloatBall = ref(false)
+const isFloatBallExpanded = ref(false)
+const floatBallPos = ref({ x: 0, y: 0 })
+const isDragging = ref(false)
+const dragOffset = ref({ x: 0, y: 0 })
+const floatBallRef = ref<HTMLElement | null>(null)
+const waveOffset = ref(0) // 用于水波动画
+
+// 核心计算属性：计算有效目标值
+const effectiveTargetGB = computed(() => {
+  const val = selectedTargetMode.value
+  if (val === 'custom')
+    return customTargetValue.value
+  return val
+})
+
+// 初始化悬浮球位置
+function initFloatBallPos() {
+  const width = window.innerWidth
+  const height = window.innerHeight
+  // 默认位置：右侧，垂直居中偏上
+  floatBallPos.value = {
+    x: width - 70,
+    y: height * 0.4,
+  }
+}
+
+// 【新增】修正悬浮球位置，防止窗口缩放后溢出
+function correctFloatBallPosition() {
+  if (!floatBallRef.value)
+    return
+
+  const ballSize = isFloatBallExpanded.value ? 170 : 60 // 根据展开状态估算大小，或者统一按最大算
+  const currentX = floatBallPos.value.x
+  const currentY = floatBallPos.value.y
+  const screenWidth = window.innerWidth
+  const screenHeight = window.innerHeight
+
+  let newX = currentX
+  let newY = currentY
+
+  // 检查右边界 (如果球的最右侧超出了屏幕)
+  // 注意：展开状态下球会变宽，这里保守估计留 180px 的余量
+  const safeRightMargin = isFloatBallExpanded.value ? 180 : 70
+
+  if (currentX + safeRightMargin > screenWidth) {
+    newX = Math.max(10, screenWidth - safeRightMargin)
+  }
+
+  // 检查左边界
+  if (currentX < 10) {
+    newX = 10
+  }
+
+  // 检查下边界
+  const safeBottomMargin = isFloatBallExpanded.value ? 200 : 70
+  if (currentY + safeBottomMargin > screenHeight) {
+    newY = Math.max(10, screenHeight - safeBottomMargin)
+  }
+
+  // 检查上边界
+  if (currentY < 10) {
+    newY = 10
+  }
+
+  // 只有位置发生变化时才更新，避免不必要的渲染
+  if (newX !== currentX || newY !== currentY) {
+    floatBallPos.value = { x: newX, y: newY }
+  }
+}
+
+// 【关键】水位计算逻辑
+const waterPercent = computed(() => {
+  const target = effectiveTargetGB.value
+  if (target === undefined || target === null)
+    return 0
+
+  // 无限模式：水位在 80% - 95% 之间波动，模拟满溢状态
+  if (target === 'infinity') {
+    const timeFactor = (Date.now() / 1000) % 4
+    return 80 + Math.sin(timeFactor * Math.PI / 2) * 15
+  }
+
+  const numTarget = typeof target === 'number' ? target : 0
+  const targetBytes = numTarget * 1024 * 1024 * 1024
+  if (targetBytes === 0)
+    return 0
+
+  const percent = (totalDownloaded.value / targetBytes) * 100
+  return Math.min(100, Math.max(0, percent))
+})
+
+// 拖拽开始
+function handleStartDrag(event: MouseEvent | TouchEvent) {
+  if (!floatBallRef.value)
+    return
+  isDragging.value = true
+  // 如果正在展开状态，先收起，方便拖拽
+  if (isFloatBallExpanded.value) {
+    isFloatBallExpanded.value = false
+  }
+
+  const clientX = 'touches' in event ? event.touches[0].clientX : event.clientX
+  const clientY = 'touches' in event ? event.touches[0].clientY : event.clientY
+
+  const rect = floatBallRef.value.getBoundingClientRect()
+  dragOffset.value = {
+    x: clientX - rect.left,
+    y: clientY - rect.top,
+  }
+}
+
+// 拖拽移动
+function handleMoveDrag(event: MouseEvent | TouchEvent) {
+  if (!isDragging.value)
+    return
+  event.preventDefault() // 防止滚动
+
+  const clientX = 'touches' in event ? event.touches[0].clientX : event.clientX
+  const clientY = 'touches' in event ? event.touches[0].clientY : event.clientY
+
+  const ballSize = 60
+  const newX = clientX - dragOffset.value.x
+  const newY = clientY - dragOffset.value.y
+
+  const maxX = window.innerWidth - ballSize
+  const maxY = window.innerHeight - ballSize
+
+  floatBallPos.value.x = Math.max(0, Math.min(newX, maxX))
+  floatBallPos.value.y = Math.max(0, Math.min(newY, maxY))
+}
+
+// 拖拽结束
+function handleEndDrag() {
+  isDragging.value = false
+}
+
+// 点击切换展开/收起
+async function toggleFloatBall() {
+  if (isDragging.value)
+    return // 防止拖拽结束时误触点击
+
+  if (!isFloatBallExpanded.value) {
+    // 即将展开
+    isFloatBallExpanded.value = true
+
+    // 等待 DOM 更新后检查是否溢出屏幕
+    await nextTick()
+    if (floatBallRef.value) {
+      const rect = floatBallRef.value.getBoundingClientRect()
+      const screenWidth = window.innerWidth
+      const screenHeight = window.innerHeight
+
+      // 右边界检查
+      if (rect.right > screenWidth - 10) {
+        const overflow = rect.right - screenWidth + 10
+        floatBallPos.value.x = Math.max(10, floatBallPos.value.x - overflow)
+      }
+      // 左边界检查
+      if (rect.left < 10) {
+        floatBallPos.value.x = 10
+      }
+      // 下边界检查
+      if (rect.bottom > screenHeight - 10) {
+        const overflowBottom = rect.bottom - screenHeight + 10
+        floatBallPos.value.y = Math.max(10, floatBallPos.value.y - overflowBottom)
+      }
+      // 上边界检查
+      if (rect.top < 10) {
+        floatBallPos.value.y = 10
+      }
+    }
+  }
+  else {
+    isFloatBallExpanded.value = false
+  }
+}
 
 function checkMobile() {
   isMobile.value = window.innerWidth < 768
+  if (isMobile.value) {
+    isBannerExpanded.value = false
+  }
+  else {
+    isBannerExpanded.value = true
+  }
 }
 
 const isRunningState = computed(() => ['starting', 'running', 'paused'].includes(status.value))
-const effectiveTargetGB = computed(() => selectedTargetMode.value === 'custom' ? customTargetValue.value : selectedTargetMode.value)
 const currentResourceUrl = computed(() => config.resourceUrlInput || '未选择')
-
-// 处理鼠标移动事件，计算悬停位置
-function handleChartMouseMove(event: MouseEvent, dataLength: number) {
-  if (!dataLength)
-    return
-  const rect = (event.target as HTMLElement).getBoundingClientRect()
-  const x = event.clientX - rect.left
-  const width = rect.width
-
-  // 计算鼠标对应的是第几个数据点
-  const index = Math.min(
-    dataLength - 1,
-    Math.max(0, Math.floor((x / width) * dataLength)),
-  )
-
-  hoverIndex.value = index
-  tooltipPos.value = { x: event.clientX, y: event.clientY }
-}
-
-function handleChartLeave() {
-  hoverIndex.value = null
-  isChartHovered.value = false
-}
-
-function handleChartEnter() {
-  isChartHovered.value = true
-}
-
-const showChart = ref(false)
-const maxSpeed = computed(() => {
-  // 【保护】如果开关关闭或无数据，直接返回 0
-  if (!showChart.value || !state.speedHistory || state.speedHistory.length === 0)
-    return 0
-  const max = Math.max(...state.speedHistory.map(d => d?.speed || 0))
-  return max > 0 ? max : 1000
-})
-
-const sparklinePoints = computed(() => {
-  // 【保护】开关关闭直接返回空，不执行任何计算
-  if (!showChart.value)
-    return ''
-
-  const history = state.speedHistory
-  if (!history || history.length < 2)
-    return ''
-
-  const width = 100
-  const height = 50
-  const maxVal = maxSpeed.value
-
-  const len = history.length - 1
-  if (len === 0)
-    return ''
-
-  return history.map((d, index) => {
-    if (!d || typeof d.speed !== 'number')
-      return ''
-    const x = (index / len) * width
-    const y = height - ((d.speed / maxVal) * height)
-    return `${x},${y}`
-  }).filter(p => p !== '').join(' ')
-})
-
-const hoverData = computed(() => {
-  // 【保护】开关关闭直接返回 null
-  if (!showChart.value)
-    return null
-  if (hoverIndex.value === null)
-    return null
-  if (!state.speedHistory || hoverIndex.value >= state.speedHistory.length)
-    return null
-
-  const data = state.speedHistory[hoverIndex.value]
-  if (!data || typeof data.speed !== 'number')
-    return null
-
-  return {
-    speed: data.speed,
-    time: new Date(data.time),
-    speedStr: formatSpeed(data.speed),
-    timeStr: data.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-  }
-})
-
-const displayTarget = computed(() => {
-  if (selectedTargetMode.value === 'infinity')
-    return '∞'
-  if (selectedTargetMode.value === 'custom')
-    return `${customTargetValue.value} GB`
-  return `${selectedTargetMode.value} GB`
-})
 
 const exampleUrl = computed(() => {
   const origin = window.location.origin
   const path = window.location.pathname
   let targetParam = '1'
-  if (selectedTargetMode.value === 'infinity')
+
+  const t = effectiveTargetGB.value
+  if (t === 'infinity')
     targetParam = 'infinity'
-  else if (selectedTargetMode.value === 'custom')
+  else if (t === 'custom')
     targetParam = String(customTargetValue.value)
-  else targetParam = String(selectedTargetMode.value)
+  else targetParam = String(t)
 
   let resourceParam = selectedUrlMode.value
   if (!Object.keys(urlMap).includes(selectedUrlMode.value))
@@ -240,85 +332,135 @@ const exampleUrl = computed(() => {
   return `${origin}${path}?${params.toString()}`
 })
 
-// 复制文本的通用方法
-async function copyToClipboard(text) {
-  // 优先使用 Clipboard API（需要 HTTPS）
+const hoverIndex = ref<number | null>(null)
+const tooltipPos = ref({ x: 0, y: 0 })
+const isChartHovered = ref(false)
+const showChart = ref(true)
+
+function handleChartMouseMove(event: MouseEvent, dataLength: number) {
+  if (!dataLength)
+    return
+  const rect = (event.target as HTMLElement).getBoundingClientRect()
+  const x = event.clientX - rect.left
+  const width = rect.width
+  const index = Math.min(dataLength - 1, Math.max(0, Math.floor((x / width) * dataLength)))
+  hoverIndex.value = index
+  tooltipPos.value = { x: event.clientX, y: event.clientY }
+}
+
+function handleChartLeave() {
+  hoverIndex.value = null
+  isChartHovered.value = false
+}
+
+function handleChartEnter() {
+  isChartHovered.value = true
+}
+
+const maxSpeed = computed(() => {
+  if (!showChart.value || !state.speedHistory || state.speedHistory.length === 0)
+    return 0
+  const max = Math.max(...state.speedHistory.map(d => d?.speed || 0))
+  return max > 0 ? max : 1000
+})
+
+const sparklinePoints = computed(() => {
+  if (!showChart.value)
+    return ''
+  const history = state.speedHistory
+  if (!history || history.length < 2)
+    return ''
+  const width = 100
+  const height = 50
+  const maxVal = maxSpeed.value
+  const len = history.length - 1
+  if (len === 0)
+    return ''
+  return history.map((d, index) => {
+    if (!d || typeof d.speed !== 'number')
+      return ''
+    const x = (index / len) * width
+    const y = height - ((d.speed / maxVal) * height)
+    return `${x},${y}`
+  }).filter(p => p !== '').join(' ')
+})
+
+const displayTarget = computed(() => {
+  const t = effectiveTargetGB.value
+  if (t === 'infinity')
+    return '∞'
+  if (t === 'custom')
+    return `${customTargetValue.value} GB`
+  return `${t} GB`
+})
+
+async function copyToClipboard(text: string) {
   if (navigator.clipboard && window.isSecureContext) {
     try {
       await navigator.clipboard.writeText(text)
-      console.log('复制成功（使用Clipboard API）')
       return true
     }
     catch (err) {
-      console.error('Clipboard API 复制失败:', err)
-      // 降级到传统方法
       return fallbackCopyText(text)
     }
   }
   else {
-    // 非 HTTPS 环境使用传统方法
     return fallbackCopyText(text)
   }
 }
 
-// 传统复制方法（兼容非 HTTPS）
-function fallbackCopyText(text) {
+function fallbackCopyText(text: string) {
   try {
-    // 创建临时textarea元素
     const textarea = document.createElement('textarea')
     textarea.value = text
-
-    // 设置样式使其不可见
     textarea.style.position = 'fixed'
     textarea.style.opacity = '0'
     textarea.style.left = '-999999px'
     textarea.style.top = '-999999px'
-
     document.body.appendChild(textarea)
-
-    // 选择文本
     textarea.focus()
     textarea.select()
-
-    // 执行复制命令
     const successful = document.execCommand('copy')
-
-    // 移除临时元素
     document.body.removeChild(textarea)
-
-    if (successful) {
-      console.log('复制成功（使用传统方法）')
-      return true
-    }
-    else {
-      console.error('传统方法复制失败')
-      return false
-    }
+    return successful
   }
   catch (err) {
-    console.error('传统方法复制出错:', err)
     return false
   }
 }
 
-// 在你的方法中使用
 async function copyExampleUrl() {
   const success = await copyToClipboard(exampleUrl.value)
-  if (success) {
-    // 显示成功提示
+  if (success)
     ElMessage.success('复制成功')
-  }
-  else {
-    // 显示失败提示，并提供手动复制的方式
-    ElMessage.warning('复制失败，请手动复制')
-  }
+  else ElMessage.warning('复制失败，请手动复制')
 }
+
+let waveTimer: number | null = null
 
 onMounted(() => {
   checkMobile()
-  window.addEventListener('resize', checkMobile)
+  initFloatBallPos()
+
+  window.addEventListener('resize', () => {
+    checkMobile()
+    // 窗口大小改变时，立即检查并修正悬浮球位置
+    correctFloatBallPosition()
+  })
   document.addEventListener('visibilitychange', handleVisibilityChange)
 
+  // 全局拖拽监听
+  document.addEventListener('mousemove', handleMoveDrag)
+  document.addEventListener('mouseup', handleEndDrag)
+  document.addEventListener('touchmove', handleMoveDrag, { passive: false })
+  document.addEventListener('touchend', handleEndDrag)
+
+  // 水波动画定时器
+  waveTimer = window.setInterval(() => {
+    waveOffset.value += 0.05
+  }, 50)
+
+  // 订阅状态变化
   unsubscribe = subscribe((newState) => {
     totalDownloaded.value = newState.totalDownloaded
     currentSpeed.value = newState.currentSpeed
@@ -336,16 +478,23 @@ onMounted(() => {
       avgSpeed.value = 0
     }
 
-    // 【新增】如果开启了保活，实时更新锁屏显示的速度
-    // 【关键修改】调用更新函数
-    // 在 subscribe 回调中
     if (isIOSBackgroundEnabled.value) {
       const isRunning = newState.status === 'running'
-      updateKeepAliveStatus(
-        newState.currentSpeed,
-        newState.totalDownloaded,
-        isRunning,
-      )
+      updateKeepAliveStatus(newState.currentSpeed, newState.totalDownloaded, isRunning)
+    }
+
+    // 【关键】根据状态控制悬浮球显示
+    if (['running', 'paused', 'starting'].includes(newState.status)) {
+      showFloatBall.value = true
+    }
+    else {
+      // 延迟隐藏，避免闪烁
+      setTimeout(() => {
+        if (['idle', 'stopped', 'finished', 'error'].includes(status.value)) {
+          showFloatBall.value = false
+          isFloatBallExpanded.value = false
+        }
+      }, 2000)
     }
   })
 
@@ -355,7 +504,6 @@ onMounted(() => {
 
   if (initBackground)
     toggleIOSBackground(true)
-
   if (initAutoStart)
     setTimeout(handleStart, 500)
 })
@@ -365,40 +513,35 @@ onUnmounted(() => {
     unsubscribe()
   if (timerInterval)
     clearInterval(timerInterval)
+  if (waveTimer)
+    clearInterval(waveTimer)
   stop()
-
-  // 【清理】调用工具函数的停止方法
   stopKeepAlive()
-
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   window.removeEventListener('resize', checkMobile)
+  document.removeEventListener('mousemove', handleMoveDrag)
+  document.removeEventListener('mouseup', handleEndDrag)
+  document.removeEventListener('touchmove', handleMoveDrag)
+  document.removeEventListener('touchend', handleEndDrag)
 })
 
 const formatMbps = (b: number) => b <= 0 ? '0 Mbps' : `${((b * 8) / (1024 * 1024)).toFixed(2)} Mbps`
 const formatSpeed = (b: number) => `${formatSize(b)}/s`
+
 const elapsedTimeStr = computed(() => {
-  // 1. 如果没有开始时间，返回 0
   if (!state.startTime)
     return '00:00:00'
-
-  // 2. 【核心修改】如果任务已结束、停止或出错，使用“结束时间”而非“当前时间”
-  // 这样计时器就会定格在任务结束的那一刻
   const isFinishedState = ['finished', 'stopped', 'error'].includes(status.value)
-
-  let endTime = currentTime.value // 默认使用当前时间（运行时）
-
+  let endTime = currentTime.value
   if (isFinishedState && state.lastCheckTime) {
-    // 如果处于结束状态，且有最后检查时间，则使用该时间作为结束点
-    // 注意：lastCheckTime 在 logic.ts 的定时器中每秒更新，非常接近实际结束时间
     endTime = state.lastCheckTime
   }
   else if (isFinishedState && !state.lastCheckTime) {
-    // 极端情况：如果刚启动就报错没有 lastCheckTime，fallback 到 startTime
     endTime = state.startTime
   }
-
   return formatDuration(endTime - state.startTime)
 })
+
 const estimatedEndTimeStr = computed(() => {
   if (effectiveTargetGB.value === 'infinity' || currentSpeed.value <= 0 || status.value !== 'running')
     return '-'
@@ -424,9 +567,6 @@ function formatDuration(ms: number) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
 }
 
-/**
- * 切换 iOS 后台保活开关
- */
 function toggleIOSBackground(enabled?: boolean) {
   const shouldEnable = enabled !== undefined ? enabled : isIOSBackgroundEnabled.value
   if (!shouldEnable) {
@@ -436,7 +576,6 @@ function toggleIOSBackground(enabled?: boolean) {
   try {
     startKeepAlive({
       volume: 0.05,
-      // 确保这里传入了目标值，这样锁屏才能显示 "1.2G/10G"
       targetGB: effectiveTargetGB.value,
       onPlay: () => {
         if (['paused', 'idle'].includes(status.value))
@@ -459,7 +598,7 @@ function handleTargetModeChange(v: any) {
   updateConfig('targetGB', v === 'custom' ? customTargetValue.value : v)
 }
 
-const handleCustomTargetChange = (v: number | undefined, p: number | undefined) => updateConfig('targetGB', v)
+const handleCustomTargetChange = (v: number | undefined) => updateConfig('targetGB', v)
 
 function handleUrlModeChange(v: string) {
   if (v === 'custom') {
@@ -495,6 +634,7 @@ const progressPercent = computed(() => {
   const tb = (t as number) * 1024 * 1024 * 1024
   return tb === 0 ? 0 : Math.min(100, (totalDownloaded.value / tb) * 100)
 })
+
 const statusText = computed(() => ({
   idle: '就绪',
   starting: '启动中',
@@ -504,6 +644,7 @@ const statusText = computed(() => ({
   finished: '已完成',
   error: '出错了',
 }[status.value] || status.value))
+
 const statusTagType = computed(() => ({
   idle: 'info',
   starting: 'primary',
@@ -513,6 +654,7 @@ const statusTagType = computed(() => ({
   finished: 'success',
   error: 'danger',
 }[status.value] || 'info'))
+
 const customProgressColor = computed(() => {
   if (status.value === 'error')
     return '#F56C6C'
@@ -523,14 +665,18 @@ const customProgressColor = computed(() => {
   const p = progressPercent.value
   return p < 50 ? '#409EFF' : p < 80 ? '#67C23A' : '#E6A23C'
 })
+
 const startTimeStr = computed(() => state.startTime ? new Date(state.startTime).toLocaleTimeString() : '-')
 
 function handleStart() {
-  // 【关键】如果是 iOS 且开启了保活，先启动音频
+  if (progressPercent.value === 100) {
+    ElMessage.warning('任务已完成，无需重复执行')
+    return
+  }
+
   if (/iPad|iPhone|iPod/.test(navigator.userAgent) && isIOSBackgroundEnabled.value) {
     toggleIOSBackground(true)
   }
-
   if (selectedUrlMode.value === 'custom' && !config.customUrlInput.trim()) {
     ElMessage.warning('请输入自定义资源 URL')
     return
@@ -541,7 +687,6 @@ function handleStart() {
     ElMessage.warning('资源 URL 不能为空')
     return
   }
-
   requestCount.value = 0
   errorCount.value = 0
   lastError.value = null
@@ -570,15 +715,8 @@ function handleReset() {
   ElMessage.success('数据已重置')
 }
 
-// 图表相关变量 (原代码中缺失，补充以防报错)
-const hoverIndex = ref<number | null>(null)
-const tooltipPos = ref({ x: 0, y: 0 })
-const isChartHovered = ref(false)
-
 function handleVisibilityChange() {
   if (!document.hidden) {
-    console.log('👁️ 页面回到前台')
-    // 使用 <audio> 标签通常会自动恢复，但如果发现暂停了，可以尝试提示用户
     if (isIOSBackgroundEnabled.value && !isKeepAliveActive()) {
       console.log('⚠️ 检测到保活中断，可能需要用户再次交互')
     }
@@ -590,9 +728,7 @@ function handleVisibilityChange() {
   <div class="tool-page">
     <div class="page-header">
       <h2>
-        <el-icon>
-          <Wallet />
-        </el-icon>
+        <el-icon><Wallet /></el-icon>
         流量消耗器
       </h2>
       <p class="page-desc">
@@ -602,46 +738,64 @@ function handleVisibilityChange() {
 
     <!-- 示例链接展示区 -->
     <div class="example-banner">
-      <div class="banner-content">
+      <div v-if="!isMobile" class="banner-content-desktop">
         <span class="banner-label">
           <el-icon><Connection /></el-icon>
           <strong>快速启动示例：</strong>
         </span>
         <div class="url-box">
           <code class="url-text">{{ exampleUrl }}</code>
-          <el-button
-            type="primary"
-            link
-            class="copy-btn"
-            @click="copyExampleUrl"
-          >
-            <el-icon>
-              <CopyDocument />
-            </el-icon>
+          <el-button type="primary" link class="copy-btn" @click="copyExampleUrl">
+            <el-icon><CopyDocument /></el-icon>
             复制
           </el-button>
         </div>
+        <div class="banner-tip">
+          提示：链接已同步当前配置 (目标：{{ displayTarget }}, 线程：{{ config.threads }})。
+        </div>
       </div>
-      <div class="banner-tip">
-        提示：链接已同步当前配置 (目标：{{ displayTarget }}, 线程：{{ config.threads }})。
+
+      <div v-else class="banner-content-mobile">
+        <div class="mobile-trigger" @click="isBannerExpanded = !isBannerExpanded">
+          <div class="trigger-left">
+            <el-icon class="trigger-icon">
+              <Connection />
+            </el-icon>
+            <span class="trigger-text"><strong>快速启动示例</strong></span>
+          </div>
+          <div class="trigger-right">
+            <el-icon class="arrow-icon" :class="{ 'is-expanded': isBannerExpanded }">
+              <ArrowRight />
+            </el-icon>
+          </div>
+        </div>
+
+        <transition name="slide-fade">
+          <div v-show="isBannerExpanded" class="mobile-detail-content">
+            <div class="url-box-mobile" style="width: 100%; box-sizing: border-box;">
+              <code class="url-text-full">{{ exampleUrl }}</code>
+              <el-button type="primary" size="small" style="margin-top: 8px; width: 100%;" @click="copyExampleUrl">
+                <el-icon><CopyDocument /></el-icon>
+                复制链接
+              </el-button>
+            </div>
+            <div class="banner-tip-mobile">
+              目标：{{ displayTarget }} | 线程：{{ config.threads }}
+            </div>
+          </div>
+        </transition>
       </div>
     </div>
 
-    <!-- 修改点：添加 class="height-equal-row" 用于控制高度对齐 -->
     <el-row :gutter="20" class="height-equal-row">
-      <!-- 左侧：配置面板 -->
       <el-col :xs="24" :sm="24" :md="24" :lg="8">
         <el-card shadow="always" class="config-card full-height-card">
           <template #header>
             <span class="card-title">⚙️ 配置设置</span>
           </template>
-
-          <el-form label-position="top" size="large">
+          <el-form label-position="top" :size="isMobile ? 'default' : 'large'" class="compact-form">
             <el-form-item label="目标流量">
-              <el-select
-                v-model="selectedTargetMode" style="width: 100%" :disabled="isRunningState"
-                @change="handleTargetModeChange"
-              >
+              <el-select v-model="selectedTargetMode" style="width: 100%" :disabled="isRunningState" @change="handleTargetModeChange">
                 <el-option label="♾️ 无限制 (手动停止)" value="infinity" />
                 <el-option label="0.5 GB" :value="0.5" />
                 <el-option label="1 GB" :value="1" />
@@ -656,113 +810,67 @@ function handleVisibilityChange() {
                 <el-option label="📝 自定义输入..." value="custom" />
               </el-select>
               <div v-if="selectedTargetMode === 'custom'" class="custom-input-wrapper">
-                <el-input-number
-                  v-model.number="customTargetValue" :min="0.1" :max="10000" :step="0.1"
-                  style="width: 100%" @change="handleCustomTargetChange"
-                >
+                <el-input-number v-model.number="customTargetValue" :min="0.1" :max="10000" :step="0.1" style="width: 100%" @change="handleCustomTargetChange">
                   <template #suffix>
                     GB
                   </template>
                 </el-input-number>
               </div>
-              <div
-                v-else-if="selectedTargetMode === 'infinity'" class="form-tip"
-                style="color: #E6A23C; margin-top: 5px;"
-              >
-                <el-icon>
-                  <Warning />
-                </el-icon>
+              <div v-else-if="selectedTargetMode === 'infinity'" class="form-tip" style="color: #E6A23C; margin-top: 5px;">
+                <el-icon><Warning /></el-icon>
                 任务将一直运行，直到您点击“停止”。
               </div>
             </el-form-item>
-
             <el-form-item label="并发线程数">
-              <el-input-number
-                v-model.number="config.threads" :min="1" :max="50" style="width: 100%"
-                :disabled="isRunningState" @change="updateConfig('threads', config.threads)"
-              />
+              <el-input-number v-model.number="config.threads" :min="1" :max="50" style="width: 100%" :disabled="isRunningState" @change="updateConfig('threads', config.threads)" />
             </el-form-item>
-
             <el-form-item label="资源 URL">
-              <el-select
-                v-model="selectedUrlMode" style="width: 100%" :disabled="isRunningState"
-                @change="handleUrlModeChange"
-              >
+              <el-select v-model="selectedUrlMode" style="width: 100%" :disabled="isRunningState" @change="handleUrlModeChange">
                 <el-option v-for="item in urlOptions" :key="item.value" :label="item.label" :value="item.value" />
               </el-select>
               <div v-if="selectedUrlMode === 'custom'" class="custom-input-wrapper">
-                <el-input
-                  v-model="config.customUrlInput" placeholder="请输入网址" clearable
-                  @input="handleCustomUrlInput"
-                >
+                <el-input v-model="config.customUrlInput" placeholder="请输入网址" clearable @input="handleCustomUrlInput">
                   <template #prefix>
-                    <el-icon>
-                      <Link />
-                    </el-icon>
+                    <el-icon><Link /></el-icon>
                   </template>
                 </el-input>
               </div>
             </el-form-item>
-
-            <el-form-item label="iOS Safari 后台保活">
-              <div class="ios-bg-switch">
-                <el-switch
-                  v-model="isIOSBackgroundEnabled" inline-prompt active-text="开" inactive-text="关"
-                  style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949"
-                  @change="toggleIOSBackground"
-                />
-                <div class="form-tip" style="margin-top: 5px;">
-                  <el-icon>
-                    <Cellphone />
-                  </el-icon>
-                  开启后播放静音音频，并在锁屏/灵动岛显示速度
+            <el-form-item label="iOS 后台保活" class="ios-keepalive-item">
+              <div class="ios-bg-container">
+                <div class="ios-bg-switch">
+                  <el-switch v-model="isIOSBackgroundEnabled" inline-prompt active-text="开" inactive-text="关" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" @change="toggleIOSBackground" />
+                </div>
+                <div class="ios-bg-desc">
+                  <el-icon><Cellphone /></el-icon>
+                  <span>锁屏/灵动岛显示速度</span>
                 </div>
               </div>
             </el-form-item>
-
             <div class="action-area">
-              <el-button
-                v-if="status === 'idle' || status === 'stopped' || status === 'finished' || status === 'error'"
-                type="primary" size="large" :loading="status === 'starting'" style="width: 100%"
-                @click="handleStart"
-              >
-                <el-icon>
-                  <VideoPlay />
-                </el-icon>
+              <el-button v-if="status === 'idle' || status === 'stopped' || status === 'finished' || status === 'error'" type="primary" :size="isMobile ? 'default' : 'large'" :loading="status === 'starting'" style="width: 100%" @click="handleStart">
+                <el-icon><VideoPlay /></el-icon>
                 开始消耗
               </el-button>
               <template v-else-if="status === 'running' || status === 'paused'">
                 <div class="btn-row">
-                  <el-button
-                    :type="status === 'running' ? 'warning' : 'success'" size="large"
-                    style="flex: 1;" @click="handlePauseToggle"
-                  >
-                    <el-icon>
-                      <VideoPause v-if="status === 'running'" />
-                      <VideoPlay v-else />
-                    </el-icon>
+                  <el-button :type="status === 'running' ? 'warning' : 'success'" :size="isMobile ? 'default' : 'large'" style="flex: 1;" @click="handlePauseToggle">
+                    <el-icon><VideoPause v-if="status === 'running'" /><VideoPlay v-else /></el-icon>
                     {{ status === 'running' ? '暂停' : '继续' }}
                   </el-button>
-                  <el-button type="danger" size="large" style="flex: 1; margin-left: 10px;" @click="handleStop">
-                    <el-icon>
-                      <Close />
-                    </el-icon>
+                  <el-button type="danger" :size="isMobile ? 'default' : 'large'" style="flex: 1; margin-left: 10px;" @click="handleStop">
+                    <el-icon><Close /></el-icon>
                     停止
                   </el-button>
                 </div>
               </template>
               <div class="button-group-container">
-                <el-button style="flex: 1;" :disabled="isRunningState && status !== 'paused'" @click="handleReset">
-                  <el-icon>
-                    <Refresh />
-                  </el-icon>
+                <el-button style="flex: 1;" :size="isMobile ? 'default' : 'large'" :disabled="isRunningState && status !== 'paused'" @click="handleReset">
+                  <el-icon><Refresh /></el-icon>
                   重置数据
                 </el-button>
               </div>
-              <el-alert
-                v-if="status === 'error' && lastError" title="任务出错" type="error" show-icon :closable="false"
-                style="margin-top: 15px;"
-              >
+              <el-alert v-if="status === 'error' && lastError" title="任务出错" type="error" show-icon :closable="false" style="margin-top: 15px;">
                 <template #default>
                   <span>{{ lastError }}</span>
                 </template>
@@ -772,21 +880,15 @@ function handleVisibilityChange() {
         </el-card>
       </el-col>
 
-      <!-- 右侧：监控面板 -->
       <el-col :xs="24" :sm="24" :md="24" :lg="16">
         <el-card shadow="always" class="monitor-card full-height-card">
           <template #header>
             <span class="card-title">📊 实时监控</span>
           </template>
-
-          <!-- 修改点：空闲状态增加 min-height 撑开高度 -->
           <div v-if="status === 'idle' && totalDownloaded === 0" class="empty-state">
             <el-empty description="点击左侧'开始消耗'按钮启动任务" :image-size="80" />
           </div>
-
-          <!-- 修改点：运行状态增加 flex 布局以撑开高度 -->
           <div v-else class="stats-container">
-            <!-- 当前 URL -->
             <div class="current-url-display">
               <span class="url-label">当前资源:</span>
               <el-tooltip :content="currentResourceUrl" placement="top" :disabled="currentResourceUrl.length < 50">
@@ -798,8 +900,6 @@ function handleVisibilityChange() {
                 复制
               </el-button>
             </div>
-
-            <!-- 统计行 -->
             <el-row :gutter="16" class="stat-row">
               <el-col :xs="12" :sm="12" :md="12" :lg="6">
                 <div class="stat-item">
@@ -808,9 +908,7 @@ function handleVisibilityChange() {
                   </div>
                   <div class="stat-value fixed-width-container">
                     {{ formatSize(totalDownloaded) }}
-                    <span class="stat-suffix">/ {{
-                      effectiveTargetGB === 'infinity' ? '∞' : `${effectiveTargetGB} GB`
-                    }}</span>
+                    <span class="stat-suffix">/ {{ effectiveTargetGB === 'infinity' ? '∞' : `${effectiveTargetGB} GB` }}</span>
                   </div>
                 </div>
               </el-col>
@@ -848,137 +946,26 @@ function handleVisibilityChange() {
                 </div>
               </el-col>
             </el-row>
-
-            <!-- 【优化版】速率趋势图表区域 -->
             <div v-if="showChart && state.speedHistory && state.speedHistory.length > 0" class="chart-container">
               <div class="chart-header">
                 <span class="chart-title">📈 实时速率趋势</span>
-                <span class="chart-max">
-                  峰值：<b>{{ formatSpeed(maxSpeed) }}</b>
-                  <span v-if="hoverData" class="hover-info">
-                    | 当前指向：{{ hoverData.speedStr }} ({{ hoverData.timeStr }})
-                  </span>
-                </span>
               </div>
-
-              <div
-                class="chart-body"
-                @mouseenter="handleChartEnter"
-                @mouseleave="handleChartLeave"
-                @mousemove="handleChartMouseMove($event, state.speedHistory.length)"
-              >
-                <svg viewBox="0 0 100 50" class="sparkline" preserveAspectRatio="none">
-                  <defs>
-                    <linearGradient id="speedGradient" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stop-color="#409EFF" stop-opacity="0.6" />
-                      <stop offset="100%" stop-color="#409EFF" stop-opacity="0.05" />
-                    </linearGradient>
-                  </defs>
-
-                  <!-- 填充区域 -->
-                  <polygon
-                    v-if="sparklinePoints"
-                    :points="`0,50 ${sparklinePoints} 100,50`"
-                    fill="url(#speedGradient)"
-                  />
-
-                  <!-- 折线 -->
-                  <polyline
-                    v-if="sparklinePoints"
-                    :points="sparklinePoints"
-                    fill="none"
-                    stroke="#409EFF"
-                    stroke-width="1.5"
-                    vector-effect="non-scaling-stroke"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  />
-
-                  <!-- 【新增】悬停竖线 -->
-                  <line
-                    v-if="hoverIndex !== null"
-                    :x1="(hoverIndex / (state.speedHistory.length - 1 || 1)) * 100"
-                    y1="0"
-                    :x2="(hoverIndex / (state.speedHistory.length - 1 || 1)) * 100"
-                    y2="50"
-                    stroke="#909399"
-                    stroke-width="0.5"
-                    stroke-dasharray="2,2"
-                    vector-effect="non-scaling-stroke"
-                  />
-
-                  <!-- 【新增】悬停圆点 -->
-                  <circle
-                    v-if="hoverIndex !== null && sparklinePoints"
-                    :cx="(hoverIndex / (state.speedHistory.length - 1 || 1)) * 100"
-                    :cy="50 - ((state.speedHistory[hoverIndex].speed / maxSpeed) * 50)"
-                    r="2"
-                    fill="#fff"
-                    stroke="#409EFF"
-                    stroke-width="1.5"
-                    vector-effect="non-scaling-stroke"
-                  />
-                </svg>
-
-                <!-- 【新增】自定义 Tooltip (跟随鼠标) -->
-                <div
-                  v-if="hoverData"
-                  class="chart-tooltip"
-                  :style="{ left: `${tooltipPos.x}px`, top: `${tooltipPos.y - 60}px` }"
-                >
-                  <div class="tooltip-time">
-                    {{ hoverData.timeStr }}
-                  </div>
-                  <div class="tooltip-speed">
-                    {{ hoverData.speedStr }}
-                  </div>
-                  <div class="tooltip-mbps">
-                    {{ formatMbps(hoverData.speed) }}
-                  </div>
-                </div>
-              </div>
-
-              <!-- 横坐标时间轴 (简化版：显示开始和结束时间) -->
-              <div class="chart-axis">
-                <span v-if="state.speedHistory.length > 1">
-                  {{
-                    new Date(state.speedHistory[0].time).toLocaleTimeString([], { minute: '2-digit', second: '2-digit' })
-                  }}
-                </span>
-                <span>
-                  {{
-                    new Date(state.speedHistory[state.speedHistory.length - 1].time).toLocaleTimeString([], {
-                      minute: '2-digit',
-                      second: '2-digit',
-                    })
-                  }}
-                </span>
+              <div class="chart-body">
+                <svg viewBox="0 0 100 50" class="sparkline" preserveAspectRatio="none"><polyline v-if="sparklinePoints" :points="sparklinePoints" fill="none" stroke="#409EFF" stroke-width="1.5" /></svg>
               </div>
             </div>
-            <!-- 时间信息行 -->
             <div class="time-info-row">
-              <!-- 已耗时 (始终显示) -->
               <div class="time-item main-time">
-                <el-icon>
-                  <Timer />
-                </el-icon>
+                <el-icon><Timer /></el-icon>
                 <span class="time-label">已耗时:</span>
                 <span class="time-value tabular-nums">{{ elapsedTimeStr }}</span>
               </div>
-
-              <!-- 分割线 -->
               <div v-if="effectiveTargetGB !== 'infinity'" class="time-divider" />
-
-              <!-- 【修复】预计结束时间：统一显示，移除移动端重复块 -->
               <div v-if="effectiveTargetGB !== 'infinity' && status === 'running'" class="time-item">
-                <el-icon>
-                  <Clock />
-                </el-icon>
+                <el-icon><Clock /></el-icon>
                 <span class="time-label">预计结束:</span>
                 <span class="time-value tabular-nums">{{ estimatedEndTimeStr }}</span>
               </div>
-
-              <!-- 无限模式标签 -->
               <div v-if="effectiveTargetGB === 'infinity'" class="time-item">
                 <span class="infinity-symbol">∞</span>
                 <span class="time-label">模式:</span>
@@ -987,25 +974,14 @@ function handleVisibilityChange() {
                 </el-tag>
               </div>
             </div>
-
-            <!-- 进度条 -->
             <div class="progress-section">
               <div class="progress-labels">
                 <span>总进度</span>
                 <span v-if="effectiveTargetGB === 'infinity'">∞ 运行中</span>
                 <span v-else>{{ progressPercent.toFixed(2) }}%</span>
               </div>
-              <el-progress
-                :percentage="effectiveTargetGB === 'infinity' ? 100 : progressPercent"
-                :stroke-width="24"
-                :show-text="false"
-                :color="customProgressColor"
-                :status="status === 'error' ? 'exception' : (effectiveTargetGB === 'infinity' ? 'success' : undefined)"
-                :indeterminate="effectiveTargetGB === 'infinity' && status === 'running'"
-              />
+              <el-progress :percentage="effectiveTargetGB === 'infinity' ? 100 : progressPercent" :stroke-width="24" :show-text="false" :color="customProgressColor" :indeterminate="effectiveTargetGB === 'infinity' && status === 'running'" />
             </div>
-
-            <!-- 任务详情 -->
             <div class="log-section">
               <div class="detail-header">
                 任务详情
@@ -1014,32 +990,28 @@ function handleVisibilityChange() {
                 <div class="grid-row">
                   <div class="grid-label">
                     开始时间
-                  </div>
-                  <div class="grid-value">
+                  </div><div class="grid-value">
                     <span class="tabular-nums">{{ startTimeStr }}</span>
                   </div>
                 </div>
                 <div class="grid-row">
                   <div class="grid-label">
                     平均速度
-                  </div>
-                  <div class="grid-value">
+                  </div><div class="grid-value">
                     <span class="tabular-nums">{{ formatSize(avgSpeed) }}/s</span>
                   </div>
                 </div>
                 <div class="grid-row">
                   <div class="grid-label">
                     总请求数
-                  </div>
-                  <div class="grid-value">
+                  </div><div class="grid-value">
                     <span class="tabular-nums">{{ requestCount }}</span>
                   </div>
                 </div>
                 <div class="grid-row">
                   <div class="grid-label">
                     错误次数
-                  </div>
-                  <div class="grid-value">
+                  </div><div class="grid-value">
                     <span class="tabular-nums">{{ errorCount }}</span>
                   </div>
                 </div>
@@ -1049,641 +1021,276 @@ function handleVisibilityChange() {
         </el-card>
       </el-col>
     </el-row>
+
+    <!-- 🚀 悬浮球组件 (核心视觉实现) -->
+    <transition name="float-ball-fade">
+      <div
+        v-show="showFloatBall"
+        ref="floatBallRef"
+        class="float-ball"
+        :class="{ 'is-expanded': isFloatBallExpanded, 'is-dragging': isDragging }"
+        :style="{ left: `${floatBallPos.x}px`, top: `${floatBallPos.y}px` }"
+        @mousedown="handleStartDrag"
+        @touchstart="handleStartDrag"
+        @click="toggleFloatBall"
+      >
+        <!-- 水位容器 -->
+        <div class="water-container" :style="{ height: `${waterPercent}%` }">
+          <svg class="wave-svg" viewBox="0 0 800 200" preserveAspectRatio="none">
+            <!-- 前层波浪 -->
+            <path
+              class="wave-path"
+              :d="`M0,100 C200,${100 + Math.sin(waveOffset) * 30} 400,${100 - Math.sin(waveOffset) * 30} 600,100 C800,100 800,200 0,200 Z`"
+              fill="rgba(74, 222, 128, 0.6)"
+            />
+            <!-- 后层波浪 (视差效果) -->
+            <path
+              class="wave-path wave-back"
+              :d="`M0,100 C200,${100 + Math.sin(waveOffset + 1) * 20} 400,${100 - Math.sin(waveOffset + 1) * 20} 600,100 C800,100 800,200 0,200 Z`"
+              fill="rgba(74, 222, 128, 0.4)"
+            />
+          </svg>
+        </div>
+
+        <!-- 内容区域 -->
+        <div class="ball-content">
+          <!-- 收起状态：只显示速度和迷你百分比 -->
+          <div v-if="!isFloatBallExpanded" class="ball-compact">
+            <span class="ball-speed">{{ formatSpeed(currentSpeed) }}</span>
+            <span v-if="effectiveTargetGB !== 'infinity'" class="ball-percent-mini">{{ waterPercent.toFixed(0) }}%</span>
+          </div>
+
+          <!-- 展开状态：显示详细信息 -->
+          <div v-else class="ball-expanded">
+            <div class="exp-row">
+              <span class="exp-label">速度:</span>
+              <span class="exp-value highlight">{{ formatSpeed(currentSpeed) }}</span>
+            </div>
+            <div class="exp-row">
+              <span class="exp-label">已下载:</span>
+              <span class="exp-value">{{ formatSize(totalDownloaded) }}</span>
+            </div>
+            <div class="exp-row">
+              <span class="exp-label">目标:</span>
+              <span class="exp-value">{{ effectiveTargetGB === 'infinity' ? '∞' : `${effectiveTargetGB} GB` }}</span>
+            </div>
+            <div class="exp-row">
+              <span class="exp-label">耗时:</span>
+              <span class="exp-value">{{ elapsedTimeStr }}</span>
+            </div>
+            <div class="exp-hint">
+              拖动移动 / 点击收起
+            </div>
+          </div>
+        </div>
+      </div>
+    </transition>
   </div>
 </template>
 
 <style scoped lang="scss">
-.tool-page {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 0 10px;
-}
+/* ... (保持之前的样式不变，仅确保没有隐藏悬浮球的媒体查询) ... */
+.tool-page { max-width: 1200px; margin: 0 auto; padding: 0 10px; }
+.page-header { margin-bottom: 20px; text-align: center; }
+.page-header h2 { display: flex; align-items: center; justify-content: center; gap: 10px; color: #1f2937; font-size: 1.5rem; }
+.page-desc { color: #6b7280; margin-top: 5px; font-size: 0.9rem; }
+.example-banner { background: linear-gradient(135deg, #e0f2fe 0%, #f0f9ff 100%); border: 1px solid #bae6fd; border-radius: 8px; padding: 12px 16px; margin-top: 0; margin-bottom: 15px; box-shadow: 0 2px 4px rgba(59, 130, 246, 0.1); overflow: hidden; width: 100%; box-sizing: border-box; }
+.banner-content-desktop { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+.banner-label { font-weight: 700; color: #0369a1; display: flex; align-items: center; gap: 6px; font-size: 0.9rem; }
+.url-box { display: flex; align-items: center; background: #fff; padding: 4px 10px; border-radius: 6px; border: 1px dashed #0ea5e9; width: 100%; box-sizing: border-box; }
+.url-text { font-family: 'Menlo', 'Monaco', 'Courier New', monospace; font-size: 0.8rem; color: #334155; word-break: break-all; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 8px; flex: 1; min-width: 0; }
+.copy-btn { font-weight: 600; white-space: nowrap; flex-shrink: 0; padding: 0 8px; }
+.banner-tip { font-size: 0.75rem; color: #64748b; text-align: right; font-style: italic; }
+.banner-content-mobile { display: flex; flex-direction: column; width: 100%; }
+.mobile-trigger { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; cursor: pointer; user-select: none; -webkit-tap-highlight-color: transparent; width: 100%; line-height: 1.2; }
+.trigger-left { display: flex; align-items: center; gap: 6px; }
+.trigger-icon { color: #0369a1; font-size: 1rem; flex-shrink: 0; }
+.trigger-text { font-size: 0.85rem; color: #0f172a; font-weight: 600; line-height: 1.2; }
+.trigger-right { flex-shrink: 0; }
+.arrow-icon { color: #94a3b8; transition: transform 0.3s ease; font-size: 0.9rem; &.is-expanded { transform: rotate(90deg); color: #0369a1; } }
+.mobile-detail-content { margin-top: 6px; padding-top: 6px; border-top: 1px dashed #bae6fd; width: 100%; box-sizing: border-box; overflow: hidden; }
+.url-box-mobile { background: #fff; padding: 6px 8px; border-radius: 6px; border: 1px solid #e2e8f0; display: flex; flex-direction: column; gap: 6px; width: 100% !important; max-width: 100% !important; box-sizing: border-box; overflow: hidden; }
+.url-text-full { font-family: 'Menlo', 'Monaco', 'Courier New', monospace; font-size: 0.75rem; color: #334155; word-break: break-all; line-height: 1.3; width: 100%; box-sizing: border-box; }
+.banner-tip-mobile { font-size: 0.7rem; color: #64748b; margin-top: 4px; text-align: left; width: 100%; }
+.compact-form { :deep(.el-form-item) { margin-bottom: 14px; } :deep(.el-form-item__label) { font-weight: 600; margin-bottom: 6px; } }
+.card-title { font-weight: bold; font-size: 1.1rem; }
+.form-tip { font-size: 0.8rem; color: #9ca3af; margin-top: 4px; display: flex; align-items: center; gap: 5px; }
+.custom-input-wrapper { margin-top: 10px; animation: slideDown 0.3s ease-out; }
+.action-area { margin-top: 20px; }
+.btn-row { display: flex; gap: 10px; width: 100%; }
+.button-group-container { display: flex; width: 100%; margin-top: 10px; }
+.ios-keepalive-item { margin-bottom: 10px; :deep(.el-form-item__label) { margin-bottom: 4px; font-weight: 600; } }
+.ios-bg-container { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: #f9fafb; padding: 8px 12px; border-radius: 6px; border: 1px solid #e5e7eb; .ios-bg-switch { flex-shrink: 0; } .ios-bg-desc { flex: 1; display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: #4b5563; line-height: 1.4; .el-icon { color: #13ce66; font-size: 1rem; } } }
+@media (min-width: 992px) { .height-equal-row { display: flex; align-items: stretch; } .full-height-card { height: 100%; display: flex; flex-direction: column; :deep(.el-card__body) { flex: 1; display: flex; flex-direction: column; padding: 20px; } } .empty-state { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 450px; width: 100%; } .stats-container { flex: 1; display: flex; flex-direction: column; width: 100%; .log-section { margin-top: auto; } } }
+.empty-state { padding: 40px 0; text-align: center; }
+.stats-container { animation: fadeIn 0.3s ease-in-out; }
+.current-url-display { display: flex; align-items: center; background-color: #f5f7fa; padding: 8px 12px; border-radius: 4px; margin-bottom: 16px; border: 1px solid #e4e7ed; .url-label { font-weight: bold; color: #606266; margin-right: 8px; white-space: nowrap; font-size: 0.9rem; } .url-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #303133; font-family: monospace; font-size: 0.85rem; } }
+.stat-row { margin-bottom: 16px; }
+.stat-item { background: #f9fafb; padding: 10px 5px; border-radius: 6px; text-align: center; border: 1px solid #e5e7eb; height: 100%; display: flex; flex-direction: column; justify-content: center; min-width: 0; width: 100%; box-sizing: border-box; }
+.stat-label { font-size: 0.8rem; color: #6b7280; margin-bottom: 6px; font-weight: 500; white-space: nowrap; }
+.stat-value { font-size: 1.1rem; font-weight: 700; color: #1f2937; line-height: 1.4; font-variant-numeric: tabular-nums; min-width: 12ch; display: inline-block; word-break: break-word; }
+.fixed-width-container { min-width: 14ch; }
+.stat-suffix { font-size: 0.7rem; color: #9ca3af; font-weight: normal; margin-left: 4px; white-space: nowrap; }
+.stat-suffix-small { display: block; font-size: 0.7rem; color: #10b981; font-weight: 600; margin-top: 2px; white-space: nowrap; }
+.time-info-row { display: flex; justify-content: space-around; align-items: center; background: linear-gradient(to right, #eff6ff, #f0f9ff); padding: 12px 16px; border-radius: 8px; margin: 24px 0; border: 1px solid #dbeafe; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02); flex-wrap: wrap; gap: 10px; position: relative; }
+.time-item { display: flex; align-items: center; gap: 6px; font-size: 0.9rem; color: #374151; }
+.time-item .el-icon { color: #409EFF; font-size: 1rem; }
+.time-label { font-weight: 600; color: #6b7280; white-space: nowrap; }
+.time-value { font-weight: 700; color: #1f2937; font-size: 1rem; }
+.infinity-symbol { font-size: 1.2rem; color: #E6A23C; font-weight: bold; line-height: 1; margin-right: 2px; }
+.time-divider { width: 1px; height: 20px; background-color: #cbd5e1; margin: 0 10px; }
+.progress-section { margin: 16px 0; }
+.progress-labels { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 0.85rem; color: #4b5563; font-weight: 500; }
+.log-section { margin-top: 20px; }
+.detail-header { font-size: 0.95rem; font-weight: 600; color: #374151; margin-bottom: 10px; padding-left: 4px; border-left: 4px solid #409EFF; line-height: 1.5; }
+.fixed-grid-table { display: grid; grid-template-columns: 90px 1fr; gap: 8px 12px; background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px; }
+.grid-row { display: contents; }
+.grid-label { font-size: 0.85rem; color: #6b7280; font-weight: 600; display: flex; align-items: center; justify-content: flex-end; text-align: right; padding-right: 10px; border-right: 1px solid #f3f4f6; white-space: nowrap; }
+.grid-value { font-size: 0.9rem; color: #1f2937; font-weight: 700; display: flex; align-items: center; min-width: 0; font-variant-numeric: tabular-nums; padding-left: 10px; word-break: break-all; }
 
-.page-header {
-  margin-bottom: 20px;
-  text-align: center;
-}
-
-.page-header h2 {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  color: #1f2937;
-  font-size: 1.5rem;
-}
-
-.page-desc {
-  color: #6b7280;
-  margin-top: 5px;
-  font-size: 0.9rem;
-}
-
-/* 让示例链接 Banner 紧贴顶部 (因为标题没了) */
-.example-banner {
-  background: linear-gradient(135deg, #e0f2fe 0%, #f0f9ff 100%);
-  border: 1px solid #bae6fd;
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-top: 0;
-  margin-bottom: 15px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  box-shadow: 0 2px 4px rgba(59, 130, 246, 0.1);
-}
-
-.banner-content {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.banner-label {
-  font-weight: 700;
-  color: #0369a1;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.9rem;
-}
-
-.url-box {
-  display: flex;
-  align-items: center;
-  background: #fff;
-  padding: 4px 10px;
-  border-radius: 6px;
-  border: 1px dashed #0ea5e9;
-  flex: 1;
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-  width: 100%;
-}
-
-.url-text {
-  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-  font-size: 0.8rem;
-  color: #334155;
-  word-break: break-all;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-right: 8px;
-  flex: 1;
-  min-width: 0;
-}
-
-.copy-btn {
-  font-weight: 600;
-  white-space: nowrap;
-  flex-shrink: 0;
-  padding: 0 8px;
-}
-
-.banner-tip {
-  font-size: 0.75rem;
-  color: #64748b;
-  text-align: right;
-  font-style: italic;
-}
-
-.card-title {
-  font-weight: bold;
-  font-size: 1.1rem;
-}
-
-.form-tip {
-  font-size: 0.8rem;
-  color: #9ca3af;
-  margin-top: 4px;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.custom-input-wrapper {
-  margin-top: 10px;
-  animation: slideDown 0.3s ease-out;
-}
-
-.action-area {
-  margin-top: 20px;
-}
-
-.btn-row {
-  display: flex;
-  gap: 10px;
-  width: 100%;
-}
-
-.button-group-container {
-  display: flex;
-  width: 100%;
-  margin-top: 10px;
-}
-
-/* --- 核心修改开始：高度对齐逻辑 --- */
-
-/* 1. 让 Row 在桌面端表现为 Flex 容器，使列等高 */
-@media (min-width: 992px) {
-  .height-equal-row {
-    display: flex;
-    align-items: stretch;
-  }
-
-  /* 确保 Card 填满列的高度 */
-  .full-height-card {
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-
-    :deep(.el-card__body) {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      padding: 20px;
-    }
-  }
-
-  /* 2. 空闲状态：强制撑开高度 */
-  .empty-state {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 450px; /* 根据左侧表单大概高度设定 */
-    width: 100%;
-  }
-
-  /* 3. 运行状态：内容区域弹性拉伸 */
-  .stats-container {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    width: 100%;
-
-    /* 将底部的日志区域推到底部 */
-    .log-section {
-      margin-top: auto;
-    }
-  }
-}
-
-/* --- 核心修改结束 --- */
-
-.empty-state {
-  padding: 40px 0;
-  text-align: center;
-}
-
-.stats-container {
-  animation: fadeIn 0.3s ease-in-out;
-}
-
-.current-url-display {
-  display: flex;
-  align-items: center;
-  background-color: #f5f7fa;
-  padding: 8px 12px;
-  border-radius: 4px;
-  margin-bottom: 16px;
-  border: 1px solid #e4e7ed;
-
-  .url-label {
-    font-weight: bold;
-    color: #606266;
-    margin-right: 8px;
-    white-space: nowrap;
-    font-size: 0.9rem;
-  }
-
-  .url-text {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: #303133;
-    font-family: monospace;
-    font-size: 0.85rem;
-  }
-}
-
-.stat-row {
-  margin-bottom: 16px;
-}
-
-.stat-item {
-  background: #f9fafb;
-  padding: 10px 5px;
-  border-radius: 6px;
-  text-align: center;
-  border: 1px solid #e5e7eb;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  min-width: 0;
-  width: 100%;
-  box-sizing: border-box;
-}
-
-.stat-label {
-  font-size: 0.8rem;
-  color: #6b7280;
-  margin-bottom: 6px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.stat-value {
-  font-size: 1.1rem;
-  font-weight: 700;
-  color: #1f2937;
-  line-height: 1.4;
-  font-variant-numeric: tabular-nums;
-  font-feature-settings: "tnum";
-  min-width: 12ch;
-  display: inline-block;
-  word-break: break-word;
-}
-
-.fixed-width-container {
-  min-width: 14ch;
-}
-
-.stat-suffix {
-  font-size: 0.7rem;
-  color: #9ca3af;
-  font-weight: normal;
-  margin-left: 4px;
-  white-space: nowrap;
-}
-
-.stat-suffix-small {
-  display: block;
-  font-size: 0.7rem;
-  color: #10b981;
-  font-weight: 600;
-  margin-top: 2px;
-  white-space: nowrap;
-}
-
-.time-info-row {
-  display: flex;
-  justify-content: space-around;
-  align-items: center;
-  background: linear-gradient(to right, #eff6ff, #f0f9ff);
-  padding: 12px 16px;
-  border-radius: 8px;
-  margin: 24px 0;
-  border: 1px solid #dbeafe;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02);
-  flex-wrap: wrap;
-  gap: 10px;
-  position: relative;
-}
-
-.time-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.9rem;
-  color: #374151;
-}
-
-.time-item .el-icon {
-  color: #409EFF;
-  font-size: 1rem;
-}
-
-.time-label {
-  font-weight: 600;
-  color: #6b7280;
-  white-space: nowrap;
-}
-
-.time-value {
-  font-weight: 700;
-  color: #1f2937;
-  font-size: 1rem;
-}
-
-.infinity-symbol {
-  font-size: 1.2rem;
-  color: #E6A23C;
-  font-weight: bold;
-  line-height: 1;
-  margin-right: 2px;
-}
-
-.time-divider {
-  width: 1px;
-  height: 20px;
-  background-color: #cbd5e1;
-  margin: 0 10px;
-}
-
-.progress-section {
-  margin: 16px 0;
-}
-
-.progress-labels {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 8px;
-  font-size: 0.85rem;
-  color: #4b5563;
-  font-weight: 500;
-}
-
-.log-section {
-  margin-top: 20px;
-}
-
-.detail-header {
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: #374151;
-  margin-bottom: 10px;
-  padding-left: 4px;
-  border-left: 4px solid #409EFF;
-  line-height: 1.5;
-}
-
-.fixed-grid-table {
-  display: grid;
-  grid-template-columns: 90px 1fr;
-  gap: 8px 12px;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  padding: 12px;
-}
-
-.grid-row {
-  display: contents;
-}
-
-.grid-label {
-  font-size: 0.85rem;
-  color: #6b7280;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  text-align: right;
-  padding-right: 10px;
-  border-right: 1px solid #f3f4f6;
-  white-space: nowrap;
-}
-
-.grid-value {
-  font-size: 0.9rem;
-  color: #1f2937;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  font-variant-numeric: tabular-nums;
-  font-feature-settings: "tnum";
-  padding-left: 10px;
-  word-break: break-all;
-}
-
+/* 移动端适配 */
 @media (max-width: 768px) {
+  .page-header { display: none !important; }
+  .tool-page { padding: 0 8px; }
+  .compact-form { :deep(.el-form-item) { margin-bottom: 10px !important; } :deep(.el-form-item__label) { font-size: 0.85rem; margin-bottom: 4px !important; line-height: 1.2; } :deep(.el-input__wrapper), :deep(.el-select .el-input__wrapper), :deep(.el-input-number .el-input__wrapper) { padding: 0 10px; height: 36px; } :deep(.el-input__inner) { font-size: 0.9rem; } :deep(.el-select .el-input__inner) { height: 36px; line-height: 36px; } :deep(.el-button) { height: 36px; padding: 0 12px; font-size: 0.9rem; } :deep(.el-switch) { transform: scale(0.9); transform-origin: left center; } }
+  :deep(.el-card__body) { padding: 12px !important; }
+  .card-title { font-size: 1rem; }
+  .example-banner { padding: 8px 12px; margin-bottom: 12px; }
+  .monitor-card { margin-top: 12px !important; }
+  .stat-row { gap: 8px !important; margin-bottom: 10px; display: flex; flex-wrap: wrap; justify-content: space-between; }
+  .stat-row > .el-col { width: 48% !important; max-width: 48% !important; flex: 0 0 48%; }
+  .stat-item { padding: 6px 2px; }
+  .stat-label { font-size: 0.7rem; margin-bottom: 4px; }
+  .stat-value { font-size: 0.9rem; min-width: 8ch; }
+  .fixed-width-container { min-width: 9ch; }
+  .time-info-row { flex-direction: row; flex-wrap: wrap; padding: 8px 10px; margin: 12px 0; justify-content: flex-start; gap: 8px; }
+  .time-divider { display: none; }
+  .time-item { width: 48%; font-size: 0.8rem; margin-bottom: 4px; }
+  .main-time { width: 100%; margin-bottom: 6px; border-bottom: 1px solid #e5e7eb; padding-bottom: 6px; }
+  .fixed-grid-table { grid-template-columns: 65px 1fr; padding: 8px; gap: 4px 8px; }
+  .grid-label { font-size: 0.75rem; padding-right: 4px; }
+  .grid-value { font-size: 0.8rem; padding-left: 4px; }
+  .empty-state { min-height: 150px; }
+  .empty-state :deep(.el-empty__description) { font-size: 0.8rem; }
+  .ios-bg-container { padding: 6px 8px; .ios-bg-desc { font-size: 0.75rem; span { max-width: 130px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } } }
+}
 
-  .page-header {
-    display: none !important;
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes slideDown { from { opacity: 0; transform: translateY(-10px); max-height: 0; } to { opacity: 1; transform: translateY(0); max-height: 500px; } }
+.slide-fade-enter-active, .slide-fade-leave-active { transition: all 0.3s ease; max-height: 500px; opacity: 1; overflow: hidden; }
+.slide-fade-enter-from, .slide-fade-leave-to { max-height: 0; opacity: 0; }
+.chart-container { background: #fff; border: 1px solid #e4e7ed; border-radius: 6px; padding: 12px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02); position: relative; animation: fadeIn 0.3s ease-in-out; .chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 0.85rem; flex-wrap: wrap; gap: 5px; .chart-title { font-weight: 600; color: #606266; } } .chart-body { height: 70px; width: 100%; position: relative; cursor: crosshair; .sparkline { width: 100%; height: 100%; display: block; overflow: visible; } } }
+
+/* --- 悬浮球样式 (核心视觉实现) --- */
+.float-ball {
+  position: fixed;
+  z-index: 9999;
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  background: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  overflow: hidden;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+  height 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+  border-radius 0.3s,
+  transform 0.2s,
+  background 0.3s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+
+  &:active { cursor: grabbing; }
+  &.is-dragging { opacity: 0.9; transform: scale(1.05); transition: none; }
+
+  /* 水位容器 */
+  .water-container {
+    position: absolute;
+    bottom: 0; left: 0; width: 100%; height: 0%;
+    transition: height 0.5s ease-out;
+    z-index: 0; pointer-events: none;
+
+    .wave-svg {
+      position: absolute; top: -50%; left: 0; width: 200%; height: 200%;
+
+      .wave-path {
+        transition: d 0.1s linear;
+      }
+      .wave-back {
+        opacity: 0.5;
+        transform: translateX(-20px);
+      }
+    }
   }
 
-  .tool-page {
-    padding: 0 5px;
-  }
-  .page-header {
-    margin-bottom: 15px;
-  }
-  .page-header h2 {
-    font-size: 1.25rem;
+  .ball-content {
+    position: relative; z-index: 1; width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.3s;
   }
 
-  .banner-content {
-    flex-direction: column;
+  /* 收起状态样式 */
+  .ball-compact {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; width: 100%;
+
+    .ball-speed {
+      font-family: 'Menlo', monospace; font-size: 0.75rem; font-weight: 700;
+      color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+      line-height: 1.2; max-width: 90%; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis;
+    }
+    .ball-percent-mini {
+      font-size: 0.6rem; color: rgba(255, 255, 255, 0.8);
+      margin-top: 2px; font-weight: 600;
+    }
+  }
+
+  /* 展开状态样式 */
+  &.is-expanded {
+    width: 170px;
+    height: auto;
+    min-height: 160px;
+    border-radius: 16px;
+    padding: 12px;
     align-items: flex-start;
-    gap: 8px;
-  }
-  .url-box {
-    width: 100%;
-    box-sizing: border-box;
-  }
-  .banner-tip {
-    text-align: left;
-    width: 100%;
-  }
-
-  .monitor-card {
-    margin-top: 15px !important;
-  }
-
-  .stat-row {
-    gap: 10px !important;
-    margin-bottom: 12px;
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: space-between;
-  }
-  .stat-row > .el-col {
-    width: 48% !important;
-    max-width: 48% !important;
-    flex: 0 0 48%;
-  }
-
-  .stat-item {
-    padding: 8px 2px;
-  }
-  .stat-label {
-    font-size: 0.75rem;
-  }
-  .stat-value {
-    font-size: 0.95rem;
-    min-width: 9ch;
-  }
-  .fixed-width-container {
-    min-width: 10ch;
-  }
-
-  .time-info-row {
-    flex-direction: row;
-    flex-wrap: wrap;
-    padding: 10px;
-    margin: 16px 0;
     justify-content: flex-start;
-  }
-  .time-divider {
-    display: none;
-  }
-  .time-item {
-    width: 48%;
-    font-size: 0.85rem;
-    margin-bottom: 4px;
-  }
-  .main-time {
-    width: 100%;
-    margin-bottom: 8px;
-    border-bottom: 1px solid #e5e7eb;
-    padding-bottom: 8px;
-  }
+    background: rgba(15, 23, 42, 0.85);
+    cursor: default;
 
-  .fixed-grid-table {
-    grid-template-columns: 70px 1fr;
-    padding: 10px;
-    gap: 6px 8px;
-  }
-  .grid-label {
-    font-size: 0.8rem;
-    padding-right: 6px;
-  }
-  .grid-value {
-    font-size: 0.85rem;
-    padding-left: 6px;
-  }
+    .ball-compact { display: none; }
 
-  /* 手机端不需要强制等高，恢复自然流 */
-  .empty-state {
-    min-height: 200px;
-  }
-}
+    .ball-expanded {
+      display: flex; flex-direction: column; gap: 6px; width: 100%;
 
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
+      .exp-row {
+        display: flex; justify-content: space-between; align-items: center;
+        font-size: 0.75rem;
 
-@keyframes slideDown {
-  from {
-    opacity: 0;
-    transform: translateY(-10px);
-    max-height: 0;
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-    max-height: 100px;
-  }
-}
+        .exp-label { color: #94a3b8; margin-right: 8px; white-space: nowrap; }
+        .exp-value {
+          font-family: 'Menlo', monospace; color: #fff; text-align: right;
+          word-break: break-all;
 
-/* 图表容器优化 */
-.chart-container {
-  background: #fff;
-  border: 1px solid #e4e7ed;
-  border-radius: 6px;
-  padding: 12px;
-  margin-bottom: 20px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02);
-  position: relative; /* 为 tooltip 定位参考 */
-  animation: fadeIn 0.3s ease-in-out;
-
-  .chart-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 8px;
-    font-size: 0.85rem;
-    flex-wrap: wrap;
-    gap: 5px;
-
-    .chart-title {
-      font-weight: 600;
-      color: #606266;
-    }
-
-    .chart-max {
-      color: #909399;
-      font-size: 0.8rem;
-
-      b {
-        color: #67C23A;
-        font-weight: 700;
+          &.highlight { color: #4ade80; font-weight: 700; font-size: 0.85rem; }
+        }
       }
-
-      .hover-info {
-        color: #409EFF;
-        margin-left: 8px;
-        font-weight: 600;
-        animation: fadeIn 0.2s;
+      .exp-hint {
+        margin-top: 8px; font-size: 0.65rem; color: #64748b;
+        text-align: center; width: 100%;
+        border-top: 1px solid rgba(255,255,255,0.1); padding-top: 6px;
       }
     }
   }
-
-  .chart-body {
-    height: 70px; /* 稍微增高一点 */
-    width: 100%;
-    position: relative;
-    cursor: crosshair; /* 鼠标变为十字准星 */
-
-    .sparkline {
-      width: 100%;
-      height: 100%;
-      display: block;
-      overflow: visible;
-    }
-  }
-
-  /* 横坐标轴 */
-  .chart-axis {
-    display: flex;
-    justify-content: space-between;
-    margin-top: 6px;
-    font-size: 0.7rem;
-    color: #c0c4cc;
-    padding: 0 2px;
-  }
-
-  /* 【新增】Tooltip 样式 */
-  .chart-tooltip {
-    position: fixed; /* 使用 fixed 防止溢出容器 */
-    z-index: 9999;
-    background: rgba(30, 30, 30, 0.95);
-    color: #fff;
-    padding: 8px 12px;
-    border-radius: 6px;
-    font-size: 0.8rem;
-    pointer-events: none; /* 鼠标穿透 */
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    backdrop-filter: blur(4px);
-    transform: translateX(-50%); /* 居中 */
-    white-space: nowrap;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-
-    .tooltip-time {
-      color: #a0cfff;
-      font-size: 0.75rem;
-      margin-bottom: 4px;
-      text-align: center;
-    }
-
-    .tooltip-speed {
-      font-weight: 700;
-      font-size: 1rem;
-      color: #67C23A;
-      text-align: center;
-    }
-
-    .tooltip-mbps {
-      font-size: 0.7rem;
-      color: #ddd;
-      text-align: center;
-      margin-top: 2px;
-      font-family: monospace;
-    }
-  }
 }
+
+.float-ball-fade-enter-active, .float-ball-fade-leave-active { transition: opacity 0.3s, transform 0.3s; }
+.float-ball-fade-enter-from, .float-ball-fade-leave-to { opacity: 0; transform: scale(0.5); }
 </style>
