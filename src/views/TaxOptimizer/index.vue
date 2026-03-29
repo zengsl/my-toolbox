@@ -462,10 +462,11 @@ function runCalculation() {
 
 <style scoped>
 /* --- 基础变量 --- */
-:root {
+:global(:root) {
   --primary-color: #2563eb;
   --primary-hover: #1d4ed8;
   --success-color: #10b981;
+  --success-hover: #059669;     /* 稍微深一点的绿色用于悬停 */
   --bg-color: #f8fafc;
   --card-bg: #ffffff;
   --text-main: #1e293b;
