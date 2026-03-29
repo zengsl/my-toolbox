@@ -113,7 +113,7 @@ function toggleMode() {
   else {
     personB.value = {
       name: '配偶',
-      annualIncome: 51104.67,
+      annualIncome: 0,
       deductions: [],
     }
   }
