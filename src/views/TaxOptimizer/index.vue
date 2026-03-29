@@ -133,6 +133,33 @@ function runCalculation() {
     }, 100)
   }, 400)
 }
+
+// 控制提示面板的展开/折叠
+const isTipsOpen = ref(false)
+
+// 定义 Tooltip 组件 (直接写在 script setup 里)
+const Tooltip = defineComponent({
+  props: {
+    content: { type: String, required: true },
+  },
+  setup(props, { slots }) {
+    const show = ref(false)
+    return () => h('div', {
+      class: 'tooltip-wrapper',
+      onMouseenter: () => {
+        show.value = true
+      },
+      onMouseleave: () => {
+        show.value = false
+      },
+    }, [
+      // 默认插槽：触发元素 (这里是按钮)
+      slots.default && slots.default(),
+      // Tooltip 弹窗
+      show.value && h('div', { class: 'tooltip-popup' }, props.content),
+    ])
+  },
+})
 </script>
 
 <template>
@@ -163,6 +190,23 @@ function runCalculation() {
           启用 <strong>夫妻双方</strong> 计算模式
         </span>
       </label>
+
+      <!-- 规则说明按钮 -->
+      <div class="rules-popover">
+        <button class="rules-btn">
+          <span class="icon">📖</span> 规则
+        </button>
+        <!-- 悬浮内容 -->
+        <div class="rules-content">
+          <h4>💡 填写与计算规则</h4>
+          <ul>
+            <li><b>收入填写：</b>扣除五险一金后的金额</li>
+            <li><b>自动计算：</b>系统会自动尝试所有组合，寻找家庭总税额最低的方案。</li>
+            <li><b>锁定功能：</b>点击项目后的 🔒 图标，可强制指定由谁扣除。</li>
+            <li><b>公共项目：</b>子女教育、房贷等通常建议由收入较高的一方 100% 扣除。</li>
+          </ul>
+        </div>
+      </div>
     </div>
 
     <!-- 输入区域 -->
@@ -175,7 +219,7 @@ function runCalculation() {
         </div>
 
         <div class="form-group">
-          <label>年度应纳税所得额 (元)</label>
+          <label>年度应纳税所得额 (元)(扣除五险一金)</label>
           <div class="input-wrapper">
             <span class="input-prefix">¥</span>
             <input
@@ -185,9 +229,9 @@ function runCalculation() {
               class="form-input"
             >
           </div>
-          <p class="helper-text">
+          <!--          <p class="helper-text">
             指扣除五险一金后的年收入
-          </p>
+          </p> -->
         </div>
 
         <div class="deductions-section">
@@ -247,14 +291,28 @@ function runCalculation() {
                   </select>
 
                   <!-- 锁定按钮：点击切换 isFixed 状态 -->
-                  <button
+                  <!--                  <button
                     class="btn-lock-toggle"
                     :class="{ 'is-locked': item.isFixed }"
                     :title="item.isFixed ? '点击解锁以参与自动计算' : '点击锁定此比例'"
                     @click="item.isFixed = !item.isFixed"
                   >
                     {{ item.isFixed ? '🔒' : '🔓' }}
-                  </button>
+                  </button> -->
+                  <!-- 新的代码 -->
+                  <div class="lock-tooltip">
+                    <button
+                      class="btn-lock-toggle"
+                      :class="{ 'is-locked': item.isFixed }"
+                      @click="item.isFixed = !item.isFixed"
+                    >
+                      {{ item.isFixed ? '🔒' : '🔓' }}
+                    </button>
+                    <!-- 提示文字 -->
+                    <span class="tooltip-text">
+                      {{ item.isFixed ? '已锁定：计算时保持此比例不变' : '未锁定：允许系统自动优化此比例' }}
+                    </span>
+                  </div>
                 </div>
 
                 <button class="btn-icon-delete" @click="removeDeduction('personA', index)">
@@ -466,7 +524,7 @@ function runCalculation() {
   --primary-color: #2563eb;
   --primary-hover: #1d4ed8;
   --success-color: #10b981;
-  --success-hover: #059669;     /* 稍微深一点的绿色用于悬停 */
+  --success-hover: #059669; /* 稍微深一点的绿色用于悬停 */
   --bg-color: #f8fafc;
   --card-bg: #ffffff;
   --text-main: #1e293b;
@@ -521,13 +579,15 @@ function runCalculation() {
 
 /* --- 模式切换卡片 --- */
 .mode-switch-card {
-  background: var(--card-bg);
-  padding: 1rem 1.5rem;
-  border-radius: 0.75rem;
-  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
-  margin-bottom: 2rem;
   display: flex;
   align-items: center;
+  justify-content: space-between; /* 让开关和规则按钮分居两端 */
+  background: #fff;
+  padding: 1rem 1.5rem;
+  border-radius: 0.75rem;
+  border: 1px solid #e2e8f0;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
 }
 
 .switch-label {
@@ -535,7 +595,7 @@ function runCalculation() {
   align-items: center;
   gap: 1rem;
   cursor: pointer;
-  width: 100%;
+  //width: 100%;
 }
 
 .switch-track {
@@ -570,7 +630,7 @@ function runCalculation() {
   background: white;
   border-radius: 50%;
   transition: transform 0.2s;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .switch-text {
@@ -737,7 +797,7 @@ function runCalculation() {
   padding: 0.75rem;
   border-radius: 0.5rem;
   border: 1px solid var(--border-color);
-  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
 .deduction-row {
@@ -855,7 +915,9 @@ function runCalculation() {
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* --- 结果展示 --- */
@@ -869,8 +931,14 @@ function runCalculation() {
 }
 
 @keyframes slideUp {
-  from { opacity: 0; transform: translateY(20px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .result-header {
@@ -984,8 +1052,15 @@ function runCalculation() {
   color: var(--text-main);
 }
 
-.text-a { color: #2563eb; font-weight: 600; }
-.text-b { color: #7c3aed; font-weight: 600; }
+.text-a {
+  color: #2563eb;
+  font-weight: 600;
+}
+
+.text-b {
+  color: #7c3aed;
+  font-weight: 600;
+}
 
 /* --- 动画 --- */
 .fade-up-enter-active,
@@ -1022,7 +1097,7 @@ function runCalculation() {
 /* 锁定状态的高亮样式 */
 .btn-lock-toggle.is-locked {
   background-color: #fff7ed; /* 浅橙色背景 */
-  border-color: #f97316;     /* 橙色边框 */
+  border-color: #f97316; /* 橙色边框 */
   color: #c2410c;
   box-shadow: 0 0 0 1px #f97316;
 }
@@ -1039,6 +1114,7 @@ function runCalculation() {
   margin-right: auto; /* 把按钮推到右边 */
   cursor: help; /* 鼠标变成问号 */
 }
+
 .tooltip-icon {
   font-size: 16px; /* 强制固定大小，不再继承父级的大字体 */
   width: 16px;
@@ -1070,7 +1146,7 @@ function runCalculation() {
   transform: translateX(-50%); /* 居中修正 */
   font-size: 12px;
   line-height: 1.5;
-  box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
   transition: opacity 0.3s;
   pointer-events: none; /* 防止鼠标闪烁 */
   font-weight: normal;
@@ -1198,7 +1274,7 @@ function runCalculation() {
   background: white;
   padding: 1rem;
   border-radius: 0.5rem;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
 /* --- 垂直列表容器 --- */
@@ -1326,9 +1402,24 @@ function runCalculation() {
   font-weight: 600;
 }
 
-.ratio-badge.full { background: #dbeafe; color: #1e40af; } /* 蓝色 */
-.ratio-badge.half { background: #fef3c7; color: #92400e; } /* 黄色 */
-.ratio-badge.zero { background: #f1f5f9; color: #64748b; } /* 灰色 */
+.ratio-badge.full {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+/* 蓝色 */
+.ratio-badge.half {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* 黄色 */
+.ratio-badge.zero {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+/* 灰色 */
 
 .col-main {
   display: flex;
@@ -1367,8 +1458,11 @@ function runCalculation() {
 
 /* 移动端适配 */
 @media (max-width: 640px) {
-  .detail-header { display: none; } /* 隐藏表头 */
+  .detail-header {
+    display: none;
+  }
 
+  /* 隐藏表头 */
   .detail-row {
     grid-template-columns: 1fr;
     gap: 0.75rem;
@@ -1376,8 +1470,154 @@ function runCalculation() {
     border-bottom: 2px solid #f1f5f9;
   }
 
-  .col-name { font-size: 1rem; margin-bottom: 0.25rem; }
-  .col-ratio { justify-content: flex-start; }
-  .col-main { justify-content: flex-start; }
+  .col-name {
+    font-size: 1rem;
+    margin-bottom: 0.25rem;
+  }
+
+  .col-ratio {
+    justify-content: flex-start;
+  }
+
+  .col-main {
+    justify-content: flex-start;
+  }
+}
+
+.rules-popover {
+  position: relative; /* 关键：定位基准 */
+}
+
+.rules-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-size: 0.9rem;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.rules-btn:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #1e293b;
+}
+
+.rules-btn .icon {
+  font-size: 1.1rem;
+}
+
+/* 悬浮内容面板 */
+.rules-content {
+  visibility: hidden;
+  opacity: 0;
+  position: absolute;
+  top: 100%; /* 在按钮下方 */
+  right: 0;  /* 右对齐 */
+  z-index: 100;
+  margin-top: 0.75rem;
+  width: 320px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  padding: 1.25rem;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1);
+  text-align: left;
+  transition: all 0.3s ease;
+  transform: translateY(10px);
+}
+
+/* 小三角 */
+.rules-content::before {
+  content: '';
+  position: absolute;
+  top: -6px;
+  right: 20px;
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  border-left: 1px solid #e2e8f0;
+  border-top: 1px solid #e2e8f0;
+  transform: rotate(45deg);
+}
+
+/* 列表样式 */
+.rules-content h4 {
+  margin: 0 0 1rem 0;
+  color: #1e293b;
+  font-size: 1rem;
+  border-bottom: 1px solid #f1f5f9;
+  padding-bottom: 0.75rem;
+}
+
+.rules-content ul {
+  margin: 0;
+  padding-left: 1.2rem;
+  font-size: 0.85rem;
+  color: #64748b;
+  line-height: 1.7;
+}
+
+.rules-content li {
+  margin-bottom: 0.5rem;
+}
+
+/* 悬停显示 */
+.rules-popover:hover .rules-content {
+  visibility: visible;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* =========================================
+   3. 锁定按钮悬浮提示
+   ========================================= */
+.lock-tooltip {
+  position: relative;
+  display: inline-block;
+}
+
+.lock-tooltip .tooltip-text {
+  visibility: hidden;
+  width: 220px;
+  background-color: #1e293b;
+  color: #fff;
+  text-align: center;
+  border-radius: 6px;
+  padding: 10px;
+  position: absolute;
+  z-index: 1000;
+  bottom: 125%; /* 在上方 */
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  opacity: 0;
+  transition: opacity 0.2s;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+  pointer-events: none; /* 防止闪烁 */
+}
+
+/* 小三角 */
+.lock-tooltip .tooltip-text::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  margin-left: -5px;
+  border-width: 5px;
+  border-style: solid;
+  border-color: #1e293b transparent transparent transparent;
+}
+
+/* 悬停显示 */
+.lock-tooltip:hover .tooltip-text {
+  visibility: visible;
+  opacity: 1;
 }
 </style>
