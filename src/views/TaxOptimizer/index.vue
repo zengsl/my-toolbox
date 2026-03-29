@@ -166,7 +166,7 @@ const Tooltip = defineComponent({
   <div class="tax-toolbox-container">
     <header class="toolbox-header">
       <div class="header-icon">
-        🧮
+        💰
       </div>
       <div class="header-text">
         <h1>个税优化工具</h1>
@@ -200,10 +200,11 @@ const Tooltip = defineComponent({
         <div class="rules-content">
           <h4>💡 填写与计算规则</h4>
           <ul>
-            <li><b>收入填写：</b>扣除五险一金后的金额</li>
-            <li><b>自动计算：</b>系统会自动尝试所有组合，寻找家庭总税额最低的方案。</li>
-            <li><b>锁定功能：</b>点击项目后的 🔒 图标，可强制指定由谁扣除。</li>
-            <li><b>公共项目：</b>子女教育、房贷等通常建议由收入较高的一方 100% 扣除。</li>
+            <li><b>收入填写：</b>扣除五险一金和年终奖后的金额；年终奖单独计算功能后续增加🤪</li>
+            <li><b>自动计算：</b>系统会自动尝试所有组合，寻找家庭总税额最低的方案🤡</li>
+            <li><b>锁定功能：</b>点击项目后的 🔒 图标，可强制指定由谁扣除😏</li>
+            <li><b>公共项目：</b>子女教育、房贷等通常建议由收入较高的一方 100% 扣除🧐</li>
+            <li><b>补税功能：</b>后续增加🤓</li>
           </ul>
         </div>
       </div>
@@ -595,16 +596,54 @@ const Tooltip = defineComponent({
   align-items: center;
   gap: 1rem;
   cursor: pointer;
-  //width: 100%;
+}
+/* --- 开关轨道 --- */
+.switch-track {
+  width: 52px;
+  height: 28px;
+  background-color: #e2e8f0; /* 默认灰色背景 */
+  border-radius: 999px;
+  position: relative;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.05);
 }
 
-.switch-track {
-  width: 44px;
-  height: 24px;
-  background: #cbd5e1;
-  border-radius: 24px;
-  position: relative;
-  transition: background 0.2s;
+/* --- 开关手柄 --- */
+.switch-handle {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  background-color: #fff;
+  border-radius: 50%;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+/* --- 选中状态：改变轨道颜色 --- */
+/* 当 input 被选中时，轨道变成渐变蓝紫色 */
+.switch-input:checked + .switch-handle {
+  /* 移动手柄 */
+  transform: translateX(24px);
+}
+
+/* 这里我们需要利用 input:checked 来改变 track 的背景
+   注意：HTML结构中 input 在 track 内部，所以选择器要调整
+   或者直接在 label 上加状态样式
+*/
+
+/* 修正选择器逻辑：因为 input 在 track 里面，我们用 label 来控制颜色更稳妥 */
+.switch-label:has(.switch-input:checked) .switch-track {
+  background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%); /* 蓝紫渐变 */
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.4); /* 发光效果 */
+}
+
+/* 选中时：改变手柄颜色（可选，保持白色更清爽） */
+.switch-label:has(.switch-input:checked) .switch-handle {
+  background-color: #fff;
+  box-shadow: 0 2px 8px rgba(255, 255, 255, 0.4);
 }
 
 .switch-input {
@@ -619,18 +658,6 @@ const Tooltip = defineComponent({
 
 .switch-input:checked ~ .switch-track {
   background: var(--primary-color);
-}
-
-.switch-handle {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 20px;
-  height: 20px;
-  background: white;
-  border-radius: 50%;
-  transition: transform 0.2s;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .switch-text {

@@ -66,9 +66,9 @@ function closeMenu() {
           <span>流量消耗器</span>
         </el-menu-item>
 
-        <el-menu-item index="/tax-calculator" disabled style="display: none;">
+        <el-menu-item index="/tax-optimizer">
           <el-icon><Shop /></el-icon>
-          <span>个税计算器 (开发中)</span>
+          <span>个税优化器</span>
         </el-menu-item>
       </el-menu>
     </el-aside>
