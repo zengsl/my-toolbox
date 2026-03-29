@@ -34,10 +34,10 @@ import { Document, Shop, Wallet } from '@element-plus/icons-vue'
       </el-col>
 
       <el-col :xs="24" :sm="12" :md="8" class="mobile-spacer">
-        <el-card class="tool-card disabled" shadow="never">
+        <el-card class="tool-card" shadow="hover" @click="$router.push('/tax-optimizer')">
           <template #header>
             <div class="card-header">
-              <el-icon :size="24" color="#9ca3af">
+              <el-icon :size="24" color="#4f46e5">
                 <Shop />
               </el-icon>
               <span>个税计算器</span>
@@ -46,8 +46,8 @@ import { Document, Shop, Wallet } from '@element-plus/icons-vue'
           <div class="card-body">
             <p>计算个人所得税及社保公积金扣除。</p>
             <div class="card-footer">
-              <el-tag type="info" size="small">
-                开发中
+              <el-tag type="success" size="small">
+                立即使用
               </el-tag>
             </div>
           </div>

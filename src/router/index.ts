@@ -19,13 +19,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('../views/TrafficWaster/index.vue'),
         meta: { title: '流量消耗器' },
       },
-      // 未来扩展
-      // {
-      //   path: 'tax-calculator',
-      //   name: 'TaxCalculator',
-      //   component: () => import('../views/TaxCalculator/index.vue'),
-      //   meta: { title: '个税计算器' }
-      // }
+      {
+        path: 'tax-optimizer',
+        name: 'TaxOptimizer',
+        component: () => import('../views/TaxOptimizer/index.vue'),
+        meta: { title: '个税计算器' },
+      },
     ],
   },
 ]
